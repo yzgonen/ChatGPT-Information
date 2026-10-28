@@ -4,6 +4,7 @@
 
 - [Minecraft thumbnail and build instructions](../README.md): persistent defaults for future chats.
 - [Original uploads](Original%20Uploads/README.md): all 20 Minecraft ZIP archives you provided, including vanilla assets and texture packs. Oversized archives are stored in numbered parts; [reassemble.py](Original%20Uploads/reassemble.py) rebuilds and CRC-checks them.
+- **Vanilla version coverage:** the uploaded `minecraft-assets-master(2).zip` includes assets through Java 1.21.8. For newer versions, including 1.21.11, use the linked upstream repository or the exact matching version assets.
 - [Blockbench models](Blockbench/README.md): 57 `.bbmodel` files and six related texture PNGs. The source marks them CC BY 4.0; see attribution and license in that folder.
 - [Extra Items Pack, Java 1.21.11](Resource%20Packs/Extra%20Items%20Pack%20-%201.21.11.zip).
 - [Minimal HUD Icons, Java 1.21.11](Resource%20Packs/Minimal%20HUD%20Icons%20-%201.21.11.zip).
