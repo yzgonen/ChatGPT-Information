@@ -179,6 +179,51 @@ async function clearNvidiaShaderCache() {
   return { deletedFiles, skippedFiles, message: 'NVIDIA cache files removed; the driver will recreate them as needed.' };
 }
 
+async function optimizeCpuPowerPlan() {
+  assertWindows();
+  const query = await runProcess('powercfg.exe', ['/query', 'SCHEME_CURRENT', 'SUB_PROCESSOR'], { timeout: 15000 });
+  const active = await runProcess('powercfg.exe', ['/getactivescheme'], { timeout: 10000 });
+  const activeGuid = active.match(/[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}/i)?.[0];
+  if (!activeGuid) throw new Error('Could not identify the active Windows power plan.');
+  const settings = {};
+  for (const alias of ['CPMINCORES', 'PROCTHROTTLEMIN']) {
+    const section = await runProcess('powercfg.exe', ['/query', 'SCHEME_CURRENT', 'SUB_PROCESSOR', alias], { timeout: 10000 });
+    const values = [...section.matchAll(/Current\s+(AC|DC)\s+Power\s+Setting\s+Index:\s+0x([0-9a-f]+)/gi)];
+    if (!values.length) throw new Error(`Could not read the current ${alias} power settings; no changes were made.`);
+    settings[alias] = Object.fromEntries(values.map((match) => [match[1].toLowerCase(), parseInt(match[2], 16)]));
+  }
+  const backupDirectory = path.join(app.getPath('userData'), 'backups');
+  await fs.mkdir(backupDirectory, { recursive: true });
+  const backupPath = path.join(backupDirectory, `cpu-power-${new Date().toISOString().replace(/[:.]/g, '-')}.json`);
+  await fs.writeFile(backupPath, JSON.stringify({ createdUtc: new Date().toISOString(), activeGuid, settings }, null, 2), { flag: 'wx' });
+  try {
+    for (const [alias, value] of [['CPMINCORES', 100], ['PROCTHROTTLEMIN', 100]]) {
+      await runProcess('powercfg.exe', ['/setacvalueindex', activeGuid, 'SUB_PROCESSOR', alias, String(value)], { timeout: 10000 });
+      await runProcess('powercfg.exe', ['/setdcvalueindex', activeGuid, 'SUB_PROCESSOR', alias, String(value)], { timeout: 10000 });
+    }
+    await runProcess('powercfg.exe', ['/setactive', activeGuid], { timeout: 10000 });
+  } catch (error) {
+    log(`CPU power plan update failed. Previous settings are recorded at ${backupPath}.`, 'WARN');
+    throw error;
+  }
+  return { backupPath, activeGuid, message: 'Core parking disabled and minimum processor performance set to 100% for AC and DC power.' };
+}
+
+async function auditBackgroundMemory() {
+  assertWindows();
+  const powershell = String.raw`
+$ErrorActionPreference = 'Stop'
+$excluded = @('System','Idle','Registry','Memory Compression','csrss','wininit','services','lsass','svchost','dwm','explorer','FortniteClient-Win64-Shipping','EpicGamesLauncher')
+$items = Get-Process | Where-Object { $_.WorkingSet64 -ge 150MB -and $_.MainWindowHandle -eq 0 -and $excluded -notcontains $_.ProcessName } | Sort-Object WorkingSet64 -Descending | Select-Object -First 12 ProcessName,Id,@{Name='MemoryMB';Expression={[math]::Round($_.WorkingSet64 / 1MB)}}
+@($items) | ConvertTo-Json -Depth 3 -Compress
+`;
+  const output = await runProcess('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', powershell], { timeout: 20000 });
+  let processes = [];
+  try { processes = output ? JSON.parse(output) : []; } catch { throw new Error('Background memory scan returned invalid data.'); }
+  if (!Array.isArray(processes)) processes = processes ? [processes] : [];
+  return { scanned: true, processes, message: 'Listed large background memory users for review. Booster leaves other apps and browser update services running to protect open work and security updates.' };
+}
+
 function decodeIni(buffer) {
   if (buffer.length >= 2 && buffer[0] === 0xff && buffer[1] === 0xfe) return { text: buffer.subarray(2).toString('utf16le'), encoding: 'utf16le', bom: Buffer.from([0xff, 0xfe]) };
   if (buffer.length >= 2 && buffer[0] === 0xfe && buffer[1] === 0xff) {
@@ -293,8 +338,10 @@ $interfaceKey = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interf
 $profileKey = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile'
 $backup = [ordered]@{ createdUtc = [DateTime]::UtcNow.ToString('o'); adapterName = $adapter.Name; interfaceGuid = $adapter.InterfaceGuid; dns = @((Get-DnsClientServerAddress -InterfaceIndex $adapter.ifIndex -AddressFamily IPv4).ServerAddresses); registry = @{} }
 foreach ($pair in @(@($interfaceKey, 'TcpNoDelay'), @($interfaceKey, 'TcpAckFrequency'), @($profileKey, 'NetworkThrottlingIndex'))) {
-  $registryPath = $pair[0]; $propertyName = $pair[1]; $key = Get-Item -LiteralPath $registryPath -ErrorAction SilentlyContinue
-  $value = $null; if ($key) { $value = Get-ItemPropertyValue -LiteralPath $registryPath -Name $propertyName -ErrorAction SilentlyContinue }
+  $registryPath = $pair[0]; $propertyName = $pair[1]
+  $value = 0
+  $key = Get-ItemProperty -LiteralPath $registryPath -Name $propertyName -ErrorAction SilentlyContinue
+  if ($key -and $null -ne $key.$propertyName) { $value = $key.$propertyName }
   $backup.registry["$registryPath|$propertyName"] = $value
 }
 $backupPath = Join-Path $backupDirectory ('network-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.json')
@@ -338,6 +385,8 @@ async function runOptimizer() {
   try {
     for (const [name, action] of [
       ['Standby memory', purgeStandbyMemory],
+      ['CPU power plan', optimizeCpuPowerPlan],
+      ['Background memory scan', auditBackgroundMemory],
       ['Desktop Window Manager priority', raiseDwmPriority],
       ['NVIDIA shader cache', clearNvidiaShaderCache]
     ]) {
@@ -373,10 +422,15 @@ function registerIpcHandlers() {
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 1920,
-    height: 1080,
-    minWidth: 1440,
-    minHeight: 900,
+    width: 1200,
+    height: 800,
+    minWidth: 1200,
+    minHeight: 800,
+    maxWidth: 1200,
+    maxHeight: 800,
+    resizable: false,
+    fullscreenable: false,
+    center: true,
     title: 'Booster',
     backgroundColor: '#000000',
     autoHideMenuBar: true,
