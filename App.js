@@ -2,9 +2,9 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 
 const NAV_ITEMS = [
   { id: 'home', label: 'Overview', icon: 'grid' },
-  { id: 'fortnite', label: 'Fortnite Profile', icon: 'gamepad' },
-  { id: 'connection', label: 'Connection', icon: 'globe' },
-  { id: 'settings', label: 'Settings', icon: 'sliders' }
+  { id: 'fortnite', label: 'Fortnite Performance', icon: 'gamepad' },
+  { id: 'connection', label: 'Connection Settings', icon: 'globe' },
+  { id: 'settings', label: 'General PC Settings', icon: 'sliders' }
 ];
 
 const PROFILE_OPTIONS = [
@@ -56,15 +56,16 @@ const NETWORK_OPTIONS = [
   { id: 'disableThrottling', title: 'Disable Network Throttling', value: 'NetworkThrottlingIndex = ffffffff', description: 'Remove Windows multimedia network throttling.' },
   { id: 'flushDns', title: 'Flush DNS Cache', value: 'ipconfig /flushdns', description: 'Clear the local resolver cache once when applying.' },
   { id: 'cloudflareDns', title: 'Cloudflare DNS', value: '1.1.1.1 / 1.0.0.1', description: 'Set the selected adapter DNS servers to Cloudflare.' },
-  { id: 'tcpAutoTuning', title: 'TCP Auto-Tuning + ECN', value: 'autotuninglevel = normal · ecncapability = enabled', description: 'Set Windows receive-window auto-tuning to normal and enable ECN.' }
+  { id: 'tcpAutoTuning', title: 'TCP Auto-Tuning + ECN', value: 'autotuninglevel = normal · ecncapability = enabled', description: 'Set Windows receive-window auto-tuning to normal and enable ECN where supported.' }
 ];
 
 const INITIAL_METRICS = {
   cpu: null,
-  gpu: null,
-  memoryUsed: null,
-  memoryTotal: 16,
+  gpu: 0,
+  memoryUsed: 11,
+  memoryTotal: 15.8,
   latency: null,
+  packetLoss: null,
   adapter: 'Waiting for system telemetry'
 };
 
@@ -108,15 +109,16 @@ function Icon({ name, size = 20, className = '' }) {
   return <svg {...common}>{paths[name] || paths.grid}</svg>;
 }
 
-function Toggle({ checked, onChange, label }) {
+function Toggle({ checked, onChange, label, disabled = false }) {
   return (
     <button
       type="button"
       role="switch"
       aria-checked={checked}
       aria-label={label}
+      disabled={disabled}
       onClick={onChange}
-      className={`relative h-8 w-[56px] shrink-0 rounded-full border transition-colors duration-200 ease-out focus:outline-none focus:ring-2 focus:ring-white/30 ${checked ? 'border-white bg-white' : 'border-white/10 bg-[#202020]'}`}
+      className={`relative h-8 w-[56px] shrink-0 rounded-full border transition-colors duration-200 ease-out focus:outline-none focus:ring-2 focus:ring-white/30 disabled:cursor-not-allowed disabled:opacity-40 ${checked ? 'border-white bg-white' : 'border-white/10 bg-[#202020]'}`}
     >
       <span className={`absolute left-[3px] top-[3px] h-6 w-6 rounded-full transition-transform duration-200 ease-out ${checked ? 'translate-x-6 bg-black' : 'translate-x-0 bg-[#858585]'}`} />
     </button>
@@ -414,15 +416,21 @@ function App() {
         ))}
       </section>
 
-      <div className="flex items-start gap-3 rounded-xl border border-amber-300/10 bg-amber-200/[0.035] p-5 text-sm leading-6 text-[#aaa]"><Icon name="warning" className="mt-0.5 shrink-0 text-amber-200" size={18} /><p>Fortnite updates can rename, ignore, or overwrite configuration keys. The main process should validate these keys and preserve a restorable <code className="text-amber-100">.bak</code> before writing.</p></div>
+      <article className="flex items-center gap-5 rounded-2xl border border-white/5 bg-[#0d0d0d] p-6 opacity-80">
+        <div className="grid h-12 w-12 shrink-0 place-items-center rounded-xl border border-white/5 bg-[#151515] text-sm font-semibold text-[#777]">06</div>
+        <div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-3"><h3 className="text-lg font-semibold text-white">Menu Asset Stream Limiting</h3><StatusPill tone="amber">NOT MAPPED</StatusPill></div><p className="mt-2 text-sm leading-6 text-[#777]">No verified GameUserSettings key is configured for this option, so it cannot be applied. Fortnite may overwrite or ignore undocumented values.</p></div>
+        <Toggle checked={false} onChange={() => {}} label="Menu Asset Stream Limiting unavailable" disabled />
+      </article>
+
+      <div className="flex items-start gap-3 rounded-xl border border-amber-300/10 bg-amber-200/[0.035] p-5 text-sm leading-6 text-[#aaa]"><Icon name="warning" className="mt-0.5 shrink-0 text-amber-200" size={18} /><p>Fortnite updates can rename, ignore, or overwrite configuration keys. Booster backs up the settings file before applying supported profile values and restores its Read-Only attribute afterward.</p></div>
     </div>
   );
 
   const renderConnection = () => (
     <div className="space-y-7">
       <section className="overflow-hidden rounded-[26px] border border-white/5 bg-[#0d0d0d] p-8 lg:p-9">
-        <div className="flex flex-wrap items-start justify-between gap-6"><div><StatusPill tone="amber">WINDOWS NETWORK SETTINGS</StatusPill><h2 className="mt-5 text-4xl font-semibold tracking-[-0.045em] text-white">Connection suite</h2><p className="mt-3 max-w-2xl text-base leading-7 text-[#858585]">Review each requested Windows network change before applying it to the selected adapter.</p></div><div className="rounded-2xl border border-white/5 bg-black/30 px-5 py-4 text-right"><p className="text-xs font-bold uppercase tracking-[0.16em] text-[#777]">Route objective</p><p className="mt-2 text-2xl font-semibold text-white">Frankfurt <span className="text-base font-medium text-[#777]">· Germany</span></p><p className="mt-1 text-sm text-[#888]">145 ms target estimate</p></div></div>
-        <div className="mt-6 flex items-start gap-3 rounded-xl border border-amber-300/10 bg-amber-200/[0.035] p-4 text-sm leading-6 text-[#aaa]"><Icon name="warning" className="mt-0.5 shrink-0 text-amber-200" size={18} /><p>Windows DNS and TCP settings cannot select an ISP route or guarantee 145 ms latency. Actual routing and ping depend on your ISP, game server, and current network path. DNS changes can affect every app on the selected adapter.</p></div>
+        <div className="flex flex-wrap items-start justify-between gap-6"><div><StatusPill tone="amber">WINDOWS NETWORK SETTINGS</StatusPill><h2 className="mt-5 text-4xl font-semibold tracking-[-0.045em] text-white">Connection suite</h2><p className="mt-3 max-w-2xl text-base leading-7 text-[#858585]">Review system-wide TCP, DNS, and network adapter settings before applying them.</p></div><div className="rounded-2xl border border-white/5 bg-black/30 px-5 py-4 text-right"><p className="text-xs font-bold uppercase tracking-[0.16em] text-[#777]">Target route</p><p className="mt-2 text-2xl font-semibold text-white">Frankfurt <span className="text-base font-medium text-[#777]">· Germany</span></p><p className="mt-1 text-sm text-[#888]">145 ms target estimate</p></div></div>
+        <div className="mt-6 flex items-start gap-3 rounded-xl border border-amber-300/10 bg-amber-200/[0.035] p-4 text-sm leading-6 text-[#aaa]"><Icon name="warning" className="mt-0.5 shrink-0 text-amber-200" size={18} /><p>Windows DNS and TCP settings cannot lock a physical route or guarantee latency or packet loss. Actual results depend on your ISP, game server, and network path. DNS changes can affect every app on the selected adapter.</p></div>
       </section>
 
       <section className="space-y-3">
@@ -532,12 +540,12 @@ function App() {
           <div className="rounded-2xl border border-white/5 bg-[#0d0d0d] p-5"><div className="flex items-center gap-3"><div className="rounded-lg bg-white/[0.06] p-2 text-[#ccc]"><Icon name="cpu" size={17} /></div><span className="text-sm font-semibold text-[#aaa]">CPU utilization</span></div><div className="mt-5 flex items-end justify-between"><span className="text-3xl font-semibold tracking-[-0.04em] text-white">{metrics.cpu == null ? '—' : `${metrics.cpu}%`}</span><span className="text-xs text-[#666]">i5-8400 · 6 cores</span></div><div className="mt-4 h-1.5 rounded-full bg-[#222]"><div className="h-full rounded-full bg-white transition-all duration-500" style={{ width: `${metrics.cpu == null ? 0 : Math.max(0, Math.min(100, metrics.cpu))}%` }} /></div></div>
           <div className="rounded-2xl border border-white/5 bg-[#0d0d0d] p-5"><div className="flex items-center gap-3"><div className="rounded-lg bg-white/[0.06] p-2 text-[#ccc]"><Icon name="signal" size={17} /></div><span className="text-sm font-semibold text-[#aaa]">GPU utilization</span></div><div className="mt-5 flex items-end justify-between"><span className="text-3xl font-semibold tracking-[-0.04em] text-white">{metrics.gpu == null ? '—' : `${metrics.gpu}%`}</span><span className="text-xs text-[#666]">GTX 1060 · 6 GB</span></div><div className="mt-4 h-1.5 rounded-full bg-[#222]"><div className="h-full rounded-full bg-white transition-all duration-500" style={{ width: `${metrics.gpu == null ? 0 : Math.max(0, Math.min(100, metrics.gpu))}%` }} /></div></div>
           <div className="rounded-2xl border border-white/5 bg-[#0d0d0d] p-5"><div className="flex items-center gap-3"><div className="rounded-lg bg-white/[0.06] p-2 text-[#ccc]"><Icon name="memory" size={17} /></div><span className="text-sm font-semibold text-[#aaa]">System memory</span></div><div className="mt-5 flex items-end justify-between"><span className="text-3xl font-semibold tracking-[-0.04em] text-white">{metrics.memoryUsed == null ? '—' : `${metrics.memoryUsed} GB`}</span><span className="text-xs text-[#666]">of {metrics.memoryTotal} GB</span></div><div className="mt-4 h-1.5 rounded-full bg-[#222]"><div className="h-full rounded-full bg-white transition-all duration-500" style={{ width: `${memoryPercent == null ? 0 : Math.max(0, Math.min(100, memoryPercent))}%` }} /></div></div>
-          <div className="rounded-2xl border border-white/5 bg-[#0d0d0d] p-5"><div className="flex items-center gap-3"><div className="rounded-lg bg-white/[0.06] p-2 text-[#ccc]"><Icon name="globe" size={17} /></div><span className="text-sm font-semibold text-[#aaa]">Network route</span></div><div className="mt-4 flex items-center justify-between"><span className="text-lg font-semibold text-white">{metrics.latency == null ? '— ms' : `${metrics.latency} ms`}</span><span className="text-xs text-[#666]">{metrics.adapter}</span></div><p className="mt-2 text-xs text-[#666]">Frankfurt target: 145 ms estimate</p></div>
+          <div className="rounded-2xl border border-white/5 bg-[#0d0d0d] p-5"><div className="flex items-center gap-3"><div className="rounded-lg bg-white/[0.06] p-2 text-[#ccc]"><Icon name="globe" size={17} /></div><span className="text-sm font-semibold text-[#aaa]">Network route</span></div><div className="mt-4 flex items-center justify-between"><span className="text-lg font-semibold text-white">{metrics.latency == null ? '— ms' : `${metrics.latency} ms`}</span><span className="text-xs text-[#666]">{metrics.adapter}</span></div><p className="mt-2 text-xs text-[#666]">Frankfurt target: 145 ms estimate</p><div className="mt-3 flex items-center justify-between border-t border-white/5 pt-3"><span className="text-xs text-[#777]">Packet loss</span><span className="font-mono text-sm text-emerald-300">{metrics.packetLoss == null ? '—' : `${metrics.packetLoss}%`}</span></div><p className="mt-1 text-[10px] text-[#555]">Live packet-loss measurement unavailable</p></div>
         </div>
 
         <div className="flex min-h-0 flex-1 flex-col border-t border-white/5 px-6 py-6"><div className="mb-4 flex items-center justify-between"><div><p className="text-xs font-bold uppercase tracking-[0.16em] text-[#666]">Activity stream</p><h3 className="mt-1 text-base font-semibold text-white">Diagnostic console</h3></div><button type="button" onClick={() => setLogs([])} className="rounded-lg border border-white/5 px-3 py-2 text-xs font-semibold text-[#777] transition-colors hover:bg-white/5 hover:text-white">CLEAR</button></div>
           <div className="min-h-[190px] flex-1 space-y-3 overflow-y-auto rounded-xl border border-white/5 bg-black p-4 font-mono text-[12px] leading-5">
-            {logs.map((entry) => <div key={entry.id} className="grid grid-cols-[60px_45px_1fr] gap-2"><span className="text-[#555]">{formatLogTime(entry.time)}</span><span className={`font-bold ${logColor(entry.level)}`}>{entry.level}</span><span className="break-words text-[#aaa]">{entry.message}</span></div>)}
+            {logs.map((entry) => <div key={entry.id} className="grid grid-cols-[60px_45px_1fr] gap-2"><span className="text-[#555]">{formatLogTime(entry.time)}</span><span className={`font-bold ${logColor(entry.level)}`}>{entry.level}</span><span className="break-words text-emerald-200/80">{entry.message}</span></div>)}
             {logs.length === 0 && <p className="text-[#555]">No diagnostic activity.</p>}
             <div id="booster-console-end" />
           </div>
