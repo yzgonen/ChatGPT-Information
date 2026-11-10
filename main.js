@@ -182,7 +182,6 @@ async function clearNvidiaShaderCache() {
 
 async function optimizeCpuPowerPlan() {
   assertWindows();
-  const query = await runProcess('powercfg.exe', ['/query', 'SCHEME_CURRENT', 'SUB_PROCESSOR'], { timeout: 15000 });
   const active = await runProcess('powercfg.exe', ['/getactivescheme'], { timeout: 10000 });
   const activeGuid = active.match(/[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}/i)?.[0];
   if (!activeGuid) throw new Error('Could not identify the active Windows power plan.');
@@ -241,7 +240,7 @@ $local = $env:LOCALAPPDATA
 $backupDirectory = Join-Path $local 'Booster\backups'
 New-Item -ItemType Directory -Path $backupDirectory -Force | Out-Null
 $targets = @(
-  @{ id='win32PriorityThreads'; path='HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl'; name='Win32PrioritySeparation'; enabled=26; disabled=2 },
+  @{ id='win32PriorityThreads'; path='HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl'; name='Win32PrioritySeparation'; enabled=0x26; disabled=2 },
   @{ id='disableGameDvr'; path='HKCU:\System\GameConfigStore'; name='GameDVR_Enabled'; enabled=0; disabled=1 },
   @{ id='disableGameDvr'; path='HKLM:\SOFTWARE\Policies\Microsoft\Windows\GameDVR'; name='AllowGameDVR'; enabled=0; disabled=1 }
 )
@@ -346,7 +345,10 @@ async function updateFortniteSettings(flags) {
   let updatedText = format.text;
   for (const [section, key, value] of changes) updatedText = setIniValue(updatedText, section, key, value);
   const updated = encodeIni(updatedText, format);
-  if (original.equals(updated)) return { changed: false, message: 'The selected settings already match the file.' };
+  if (original.equals(updated)) {
+    await runProcess('attrib.exe', ['+R', configPath], { timeout: 10000 });
+    return { changed: false, readOnlyRestored: true, message: 'The selected settings already match the file; Read-Only is set.' };
+  }
 
   const backupPath = `${configPath}.bak`;
   const temporaryPath = `${configPath}.${randomUUID()}.tmp`;
@@ -357,18 +359,17 @@ async function updateFortniteSettings(flags) {
     if (error.code !== 'ENOENT') throw error;
   }
   await fs.copyFile(configPath, backupPath);
-  const wasReadOnly = (stat.mode & 0o200) === 0;
+  await runProcess('attrib.exe', ['-R', configPath], { timeout: 10000 });
   try {
-    if (wasReadOnly) await fs.chmod(configPath, stat.mode | 0o200);
-    await fs.writeFile(temporaryPath, updated, { flag: 'wx', mode: stat.mode });
-    if (wasReadOnly) await fs.chmod(temporaryPath, stat.mode & ~0o200);
+    await fs.writeFile(temporaryPath, updated, { flag: 'wx' });
     await fs.rename(temporaryPath, configPath);
   } catch (error) {
     await fs.rm(temporaryPath, { force: true }).catch(() => {});
-    if (wasReadOnly) await fs.chmod(configPath, stat.mode).catch(() => {});
     throw error;
+  } finally {
+    await runProcess('attrib.exe', ['+R', configPath], { timeout: 10000 });
   }
-  return { changed: true, backupPath, readOnlyRestored: wasReadOnly, settingsChanged: changes.map(([, key]) => key) };
+  return { changed: true, backupPath, readOnlyRestored: true, settingsChanged: changes.map(([, key]) => key) };
 }
 
 async function runNetworkOptimization(request) {
@@ -406,9 +407,9 @@ foreach ($option in $selected) {
       'tcpNoDelay' { New-ItemProperty -LiteralPath $interfaceKey -Name 'TcpNoDelay' -PropertyType DWord -Value 1 -Force | Out-Null; $results.Add(@{name=$option;ok=$true;message='TCPNoDelay set for the active adapter.'}) }
       'tcpAckFrequency' { New-ItemProperty -LiteralPath $interfaceKey -Name 'TcpAckFrequency' -PropertyType DWord -Value 1 -Force | Out-Null; $results.Add(@{name=$option;ok=$true;message='TCPAckFrequency set for the active adapter.'}) }
       'disableThrottling' { New-ItemProperty -LiteralPath $profileKey -Name 'NetworkThrottlingIndex' -PropertyType DWord -Value ([int]-1) -Force | Out-Null; $results.Add(@{name=$option;ok=$true;message='NetworkThrottlingIndex set to 0xffffffff.'}) }
-      'flushDns' { Clear-DnsClientCache; $results.Add(@{name=$option;ok=$true;message='DNS resolver cache flushed.'}) }
+      'flushDns' { $output = & ipconfig.exe /flushdns 2>&1; if ($LASTEXITCODE -ne 0) { throw ($output -join ' ') }; $results.Add(@{name=$option;ok=$true;message='DNS resolver cache flushed with ipconfig.'}) }
       'cloudflareDns' { Set-DnsClientServerAddress -InterfaceIndex $adapter.ifIndex -ServerAddresses @('1.1.1.1','1.0.0.1'); $results.Add(@{name=$option;ok=$true;message='Cloudflare DNS set on the active adapter.'}) }
-      'tcpAutoTuning' { $output = & netsh.exe int tcp set global autotuninglevel=normal 2>&1; if ($LASTEXITCODE -ne 0) { throw ($output -join ' ') }; $results.Add(@{name=$option;ok=$true;message='TCP auto-tuning set to normal.'}) }
+      'tcpAutoTuning' { $output = & netsh.exe int tcp set global autotuninglevel=normal 2>&1; if ($LASTEXITCODE -ne 0) { throw ($output -join ' ') }; $output = & netsh.exe int tcp set global ecncapability=enabled 2>&1; if ($LASTEXITCODE -ne 0) { throw ($output -join ' ') }; $results.Add(@{name=$option;ok=$true;message='TCP auto-tuning set to normal and ECN enabled.'}) }
     }
   } catch { $results.Add(@{name=$option;ok=$false;message=$_.Exception.Message}) }
 }

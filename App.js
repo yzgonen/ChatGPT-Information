@@ -56,7 +56,7 @@ const NETWORK_OPTIONS = [
   { id: 'disableThrottling', title: 'Disable Network Throttling', value: 'NetworkThrottlingIndex = ffffffff', description: 'Remove Windows multimedia network throttling.' },
   { id: 'flushDns', title: 'Flush DNS Cache', value: 'ipconfig /flushdns', description: 'Clear the local resolver cache once when applying.' },
   { id: 'cloudflareDns', title: 'Cloudflare DNS', value: '1.1.1.1 / 1.0.0.1', description: 'Set the selected adapter DNS servers to Cloudflare.' },
-  { id: 'tcpAutoTuning', title: 'TCP Auto-Tuning', value: 'autotuninglevel = normal', description: 'Keep Windows receive-window auto-tuning at the normal setting.' }
+  { id: 'tcpAutoTuning', title: 'TCP Auto-Tuning + ECN', value: 'autotuninglevel = normal · ecncapability = enabled', description: 'Set Windows receive-window auto-tuning to normal and enable ECN.' }
 ];
 
 const INITIAL_METRICS = {
@@ -473,7 +473,7 @@ function App() {
       <section className="space-y-3 rounded-2xl border border-white/5 bg-[#0d0d0d] p-6">
         <div><h3 className="text-lg font-semibold text-white">Windows system tweaks</h3><p className="mt-1 text-sm leading-6 text-[#777]">Choose values, then apply. Previous registry values are saved to a backup file.</p></div>
         <article className="flex items-center gap-4 rounded-xl border border-white/5 bg-black/30 p-4">
-          <div className="min-w-0 flex-1"><h4 className="text-base font-semibold text-white">Accelerate Win32 Priority Threads</h4><p className="mt-1 text-sm leading-5 text-[#777]">Set Win32PrioritySeparation to 26 to adjust thread quantum behavior.</p></div>
+          <div className="min-w-0 flex-1"><h4 className="text-base font-semibold text-white">Accelerate Win32 Priority Threads</h4><p className="mt-1 text-sm leading-5 text-[#777]">Set Win32PrioritySeparation to 0x26 (38 decimal) to adjust thread quantum behavior.</p></div>
           <Toggle checked={windowsTweaks.win32PriorityThreads} onChange={() => toggleWindowsTweak('win32PriorityThreads')} label="Accelerate Win32 Priority Threads" />
         </article>
         <article className="flex items-center gap-4 rounded-xl border border-white/5 bg-black/30 p-4">
