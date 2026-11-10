@@ -20,6 +20,7 @@ const FORTNITE_SETTINGS = {
 const NETWORK_OPTION_IDS = new Set([
   'tcpNoDelay', 'tcpAckFrequency', 'disableThrottling', 'flushDns', 'cloudflareDns', 'tcpAutoTuning'
 ]);
+const WINDOWS_TWEAK_IDS = new Set(['win32PriorityThreads', 'disableGameDvr']);
 
 let mainWindow;
 let optimizerInProgress = false;
@@ -221,7 +222,59 @@ $items = Get-Process | Where-Object { $_.WorkingSet64 -ge 150MB -and $_.MainWind
   let processes = [];
   try { processes = output ? JSON.parse(output) : []; } catch { throw new Error('Background memory scan returned invalid data.'); }
   if (!Array.isArray(processes)) processes = processes ? [processes] : [];
+  log(`Background memory scan returned ${processes.length} candidate process(es).`, 'INFO');
   return { scanned: true, processes, message: 'Listed large background memory users for review. Booster leaves other apps and browser update services running to protect open work and security updates.' };
+}
+
+async function applyWindowsTweaks(flags) {
+  assertWindows();
+  if (!flags || typeof flags !== 'object' || Array.isArray(flags)) throw new TypeError('Windows system options must be an object.');
+  for (const [key, value] of Object.entries(flags)) {
+    if (!WINDOWS_TWEAK_IDS.has(key) || typeof value !== 'boolean') throw new Error(`Unsupported Windows system option: ${key}`);
+  }
+  if (!Object.keys(flags).length) return { ok: true, results: [], message: 'No Windows system options were selected.' };
+  const encodedFlags = Buffer.from(JSON.stringify(flags), 'utf8').toString('base64');
+  const powershell = String.raw`
+$ErrorActionPreference = 'Stop'
+$flags = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encodedFlags}')) | ConvertFrom-Json
+$local = $env:LOCALAPPDATA
+$backupDirectory = Join-Path $local 'Booster\backups'
+New-Item -ItemType Directory -Path $backupDirectory -Force | Out-Null
+$targets = @(
+  @{ id='win32PriorityThreads'; path='HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl'; name='Win32PrioritySeparation'; enabled=26; disabled=2 },
+  @{ id='disableGameDvr'; path='HKCU:\System\GameConfigStore'; name='GameDVR_Enabled'; enabled=0; disabled=1 },
+  @{ id='disableGameDvr'; path='HKLM:\SOFTWARE\Policies\Microsoft\Windows\GameDVR'; name='AllowGameDVR'; enabled=0; disabled=1 }
+)
+$backup = [ordered]@{ createdUtc=[DateTime]::UtcNow.ToString('o'); values=@{} }
+foreach ($target in $targets) {
+  if (-not $flags.PSObject.Properties[$target.id]) { continue }
+  $item = Get-ItemProperty -LiteralPath $target.path -Name $target.name -ErrorAction SilentlyContinue
+  $oldValue = 0
+  if ($item -and $null -ne $item.($target.name)) { $oldValue = $item.($target.name) }
+  $backup.values["$($target.path)|$($target.name)"] = $oldValue
+}
+$backupPath = Join-Path $backupDirectory ('windows-system-' + (Get-Date -Format 'yyyyMMdd-HHmmss-fff') + '.json')
+$backup | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $backupPath -Encoding utf8
+$results = [System.Collections.Generic.List[object]]::new()
+foreach ($target in $targets) {
+  if (-not $flags.PSObject.Properties[$target.id]) { continue }
+  try {
+    New-Item -Path $target.path -Force | Out-Null
+    $value = if ($flags.$($target.id)) { $target.enabled } else { $target.disabled }
+    New-ItemProperty -LiteralPath $target.path -Name $target.name -PropertyType DWord -Value $value -Force | Out-Null
+    $results.Add(@{name=$target.name;ok=$true;value=$value;message=('Set {0} to {1}.' -f $target.name,$value)})
+  } catch {
+    $results.Add(@{name=$target.name;ok=$false;message=$_.Exception.Message})
+  }
+}
+@{ok=($results.Where({ -not $_.ok }).Count -eq 0);backupPath=$backupPath;results=@($results)} | ConvertTo-Json -Depth 6 -Compress
+`;
+  const output = await runProcess('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', powershell], { timeout: 30000 });
+  const jsonLine = output.split(/\r?\n/).filter((line) => line.trim().startsWith('{')).at(-1);
+  if (!jsonLine) throw new Error(output || 'Windows system script returned no result.');
+  const result = JSON.parse(jsonLine);
+  log(`Windows system settings saved. Backup: ${result.backupPath}.`, result.ok ? 'OK' : 'WARN');
+  return result;
 }
 
 function decodeIni(buffer) {
@@ -416,6 +469,9 @@ function handle(channel, handler) {
 function registerIpcHandlers() {
   handle('booster:launch-fortnite', launchFortnite);
   handle('booster:run-optimizer', runOptimizer);
+  handle('booster:optimize-cpu', optimizeCpuPowerPlan);
+  handle('booster:scan-background-memory', auditBackgroundMemory);
+  handle('booster:apply-windows-tweaks', applyWindowsTweaks);
   handle('booster:update-fortnite-settings', updateFortniteSettings);
   handle('booster:run-network-optimization', runNetworkOptimization);
 }

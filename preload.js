@@ -12,6 +12,9 @@ function subscribe(channel, callback) {
 contextBridge.exposeInMainWorld('booster', Object.freeze({
   launchFortnite: () => ipcRenderer.invoke('booster:launch-fortnite'),
   runOptimizer: () => ipcRenderer.invoke('booster:run-optimizer'),
+  optimizeCpu: () => ipcRenderer.invoke('booster:optimize-cpu'),
+  scanBackgroundMemory: () => ipcRenderer.invoke('booster:scan-background-memory'),
+  applyWindowsTweaks: (flags) => ipcRenderer.invoke('booster:apply-windows-tweaks', flags),
   updateFortniteSettings: (flags) => ipcRenderer.invoke('booster:update-fortnite-settings', flags),
   runNetworkOptimization: (options) => ipcRenderer.invoke('booster:run-network-optimization', options),
   onLog: (callback) => subscribe('booster:log', callback),

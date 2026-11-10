@@ -1,6 +1,6 @@
 {
   "name": "booster",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "A Windows performance dashboard for Booster.",
   "productName": "Booster",
   "main": "main.js",

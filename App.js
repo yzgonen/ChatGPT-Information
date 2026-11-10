@@ -68,6 +68,11 @@ const INITIAL_METRICS = {
   adapter: 'Waiting for system telemetry'
 };
 
+function parseBridgeResult(result) {
+  if (typeof result !== 'string') return result || {};
+  try { return JSON.parse(result); } catch { return { message: result }; }
+}
+
 function Icon({ name, size = 20, className = '' }) {
   const common = {
     width: size,
@@ -155,6 +160,12 @@ function App() {
   const [optimizing, setOptimizing] = useState(false);
   const [applyingProfile, setApplyingProfile] = useState(false);
   const [applyingNetwork, setApplyingNetwork] = useState(false);
+  const [applyingWindows, setApplyingWindows] = useState(false);
+  const [windowsTweaks, setWindowsTweaks] = useState({ win32PriorityThreads: false, disableGameDvr: false });
+  const [windowsTouched, setWindowsTouched] = useState({});
+  const [optimizingCpu, setOptimizingCpu] = useState(false);
+  const [scanningMemory, setScanningMemory] = useState(false);
+  const [memoryProcesses, setMemoryProcesses] = useState([]);
   const [profile, setProfile] = useState({
     lobbyAnimations: false,
     mobileRenderPathway: false,
@@ -201,7 +212,7 @@ function App() {
 
   useEffect(() => {
     const node = document.getElementById('booster-console-end');
-    node?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    node?.scrollIntoView({ behavior: 'auto', block: 'nearest' });
   }, [logs]);
 
   const activeIndex = Math.max(0, NAV_ITEMS.findIndex((item) => item.id === activeTab));
@@ -286,8 +297,66 @@ function App() {
     }
   };
 
+  const runCpuOptimization = async () => {
+    if (optimizingCpu) return;
+    setOptimizingCpu(true);
+    appendLog('CPU dynamic core performance requested.', 'ACTION');
+    try {
+      const result = parseBridgeResult(await callBridge('optimizeCpu'));
+      appendLog(result.message || `CPU power profile updated. Backup: ${result.backupPath || 'saved'}`, 'OK');
+      notify('CPU performance profile applied.', 'green');
+    } catch (error) {
+      appendLog(error.message, 'ERROR');
+    } finally {
+      setOptimizingCpu(false);
+    }
+  };
+
+  const scanBackgroundMemory = async () => {
+    if (scanningMemory) return;
+    setScanningMemory(true);
+    appendLog('Background memory scan requested.', 'ACTION');
+    try {
+      const result = parseBridgeResult(await callBridge('scanBackgroundMemory'));
+      const rows = Array.isArray(result.processes) ? result.processes : [];
+      setMemoryProcesses(rows);
+      appendLog(result.message || `Background scan found ${rows.length} candidate process(es).`, 'INFO');
+      for (const process of rows) appendLog(`${process.ProcessName || process.processName || 'Process'} · ${process.MemoryMB ?? process.memoryMB ?? '?'} MB · PID ${process.Id ?? process.id ?? '?'}`, 'INFO');
+      notify(`Scan complete: ${rows.length} background process(es) listed.`, 'green');
+    } catch (error) {
+      appendLog(error.message, 'ERROR');
+    } finally {
+      setScanningMemory(false);
+    }
+  };
+
+  const applyWindowsSettings = async () => {
+    if (applyingWindows) return;
+    const selected = Object.fromEntries(Object.keys(windowsTouched).map((key) => [key, windowsTweaks[key]]));
+    if (!Object.keys(selected).length) return;
+    setApplyingWindows(true);
+    appendLog('Applying selected Windows system settings.', 'ACTION');
+    try {
+      const result = parseBridgeResult(await callBridge('applyWindowsTweaks', selected));
+      for (const item of result.results || []) appendLog(`${item.name}: ${item.message || item.error || 'completed'}`, item.ok ? 'OK' : 'WARN');
+      if (result.backupPath) appendLog(`Windows settings backup saved: ${result.backupPath}`, 'INFO');
+      if (result.ok) {
+        setWindowsTouched({});
+        notify('Selected Windows settings applied.', 'green');
+      } else notify('Some Windows settings could not be applied.', 'amber');
+    } catch (error) {
+      appendLog(error.message, 'ERROR');
+    } finally {
+      setApplyingWindows(false);
+    }
+  };
+
   const toggleProfile = (id) => setProfile((current) => ({ ...current, [id]: !current[id] }));
   const toggleNetwork = (id) => setNetwork((current) => ({ ...current, [id]: !current[id] }));
+  const toggleWindowsTweak = (id) => {
+    setWindowsTweaks((current) => ({ ...current, [id]: !current[id] }));
+    setWindowsTouched((current) => ({ ...current, [id]: true }));
+  };
 
   const renderHome = () => (
     <div className="space-y-8">
@@ -371,7 +440,7 @@ function App() {
 
   const renderSettings = () => (
     <div className="space-y-7">
-      <section className="rounded-[26px] border border-white/5 bg-[#0d0d0d] p-9"><StatusPill>ABOUT THIS DEVICE</StatusPill><h2 className="mt-5 text-4xl font-semibold tracking-[-0.045em] text-white">Booster settings</h2><p className="mt-3 text-base leading-7 text-[#858585]">Current setup is tuned around the hardware report provided for this PC.</p></section>
+      <section className="rounded-[26px] border border-white/5 bg-[#0d0d0d] p-8"><StatusPill>GENERAL WINDOWS SYSTEM</StatusPill><h2 className="mt-5 text-4xl font-semibold tracking-[-0.045em] text-white">Windows settings</h2><p className="mt-3 text-base leading-7 text-[#858585]">Review system controls for the i5-8400, GTX 1060, and 16 GB memory profile.</p></section>
       <section className="grid gap-4 md:grid-cols-2">
         {[
           ['Processor', 'Intel Core i5-8400', '6 cores · 2.80 GHz'],
@@ -380,6 +449,40 @@ function App() {
           ['Display', '1920 × 1080', '144 Hz active mode']
         ].map(([label, value, detail]) => <div key={label} className="rounded-2xl border border-white/5 bg-[#0d0d0d] p-6"><p className="text-xs font-bold uppercase tracking-[0.16em] text-[#777]">{label}</p><p className="mt-4 text-xl font-semibold text-white">{value}</p><p className="mt-2 text-sm text-[#777]">{detail}</p></div>)}
       </section>
+      <section className="space-y-4">
+        <article className="rounded-2xl border border-white/5 bg-[#0d0d0d] p-6">
+          <div className="flex items-start gap-4">
+            <div className="rounded-xl border border-white/5 bg-[#151515] p-3 text-white"><Icon name="cpu" size={22} /></div>
+            <div className="min-w-0 flex-1"><h3 className="text-lg font-semibold text-white">CPU Dynamic Core Performance</h3><p className="mt-2 text-sm leading-6 text-[#777]">Disable Windows core parking and set minimum processor performance to 100%. Previous power-plan values are backed up. This changes power policy; it does not overclock the CPU.</p><p className="mt-2 text-xs leading-5 text-amber-100/70">This keeps the CPU at a high minimum state and can increase power use and heat.</p></div>
+            <button type="button" onClick={runCpuOptimization} disabled={optimizingCpu} className="shrink-0 rounded-xl bg-white px-4 py-3 text-xs font-bold text-black transition-colors hover:bg-[#ddd] disabled:opacity-50">{optimizingCpu ? 'APPLYING…' : 'APPLY CPU PROFILE'}</button>
+          </div>
+        </article>
+
+        <article className="rounded-2xl border border-white/5 bg-[#0d0d0d] p-6">
+          <div className="flex items-start gap-4">
+            <div className="rounded-xl border border-white/5 bg-[#151515] p-3 text-white"><Icon name="memory" size={22} /></div>
+            <div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-3"><h3 className="text-lg font-semibold text-white">System Memory Bloat Sweeper</h3><StatusPill>{scanningMemory ? 'SCANNING' : `${memoryProcesses.length} FOUND`}</StatusPill></div><p className="mt-2 text-sm leading-6 text-[#777]">Scan for large background processes using at least 150 MB. Results are listed for review; apps and browser update services are left running.</p></div>
+            <button type="button" onClick={scanBackgroundMemory} disabled={scanningMemory} className="shrink-0 rounded-xl border border-white/10 bg-[#171717] px-4 py-3 text-xs font-bold text-white transition-colors hover:bg-[#222] disabled:opacity-50">{scanningMemory ? 'SCANNING…' : 'SCAN MEMORY'}</button>
+          </div>
+          <div className="mt-5 max-h-36 space-y-2 overflow-y-auto rounded-xl border border-white/5 bg-black/50 p-3 font-mono text-xs">
+            {memoryProcesses.length ? memoryProcesses.map((process, index) => <div key={`${process.Id ?? process.id ?? index}-${process.ProcessName ?? process.processName ?? 'process'}`} className="flex items-center justify-between gap-3 text-[#aaa]"><span className="truncate">{process.ProcessName || process.processName || 'Process'} <span className="text-[#666]">PID {process.Id ?? process.id ?? '—'}</span></span><span className="shrink-0 text-white">{process.MemoryMB ?? process.memoryMB ?? '—'} MB</span></div>) : <p className="text-[#666]">Run a scan to list background memory users.</p>}
+          </div>
+        </article>
+      </section>
+
+      <section className="space-y-3 rounded-2xl border border-white/5 bg-[#0d0d0d] p-6">
+        <div><h3 className="text-lg font-semibold text-white">Windows system tweaks</h3><p className="mt-1 text-sm leading-6 text-[#777]">Choose values, then apply. Previous registry values are saved to a backup file.</p></div>
+        <article className="flex items-center gap-4 rounded-xl border border-white/5 bg-black/30 p-4">
+          <div className="min-w-0 flex-1"><h4 className="text-base font-semibold text-white">Accelerate Win32 Priority Threads</h4><p className="mt-1 text-sm leading-5 text-[#777]">Set Win32PrioritySeparation to 26 to adjust thread quantum behavior.</p></div>
+          <Toggle checked={windowsTweaks.win32PriorityThreads} onChange={() => toggleWindowsTweak('win32PriorityThreads')} label="Accelerate Win32 Priority Threads" />
+        </article>
+        <article className="flex items-center gap-4 rounded-xl border border-white/5 bg-black/30 p-4">
+          <div className="min-w-0 flex-1"><h4 className="text-base font-semibold text-white">Destroy Windows GameDVR Captures</h4><p className="mt-1 text-sm leading-5 text-[#777]">Disable GameDVR capture settings for the current account and Windows policy.</p></div>
+          <Toggle checked={windowsTweaks.disableGameDvr} onChange={() => toggleWindowsTweak('disableGameDvr')} label="Destroy Windows GameDVR Captures" />
+        </article>
+        <div className="flex items-center justify-between gap-4 pt-2"><p className="text-xs leading-5 text-[#666]">Windows may request administrator permission for machine-wide policy keys.</p><button type="button" onClick={applyWindowsSettings} disabled={applyingWindows || !Object.keys(windowsTouched).length} className="shrink-0 rounded-xl bg-white px-5 py-3 text-xs font-bold text-black transition-colors hover:bg-[#ddd] disabled:cursor-not-allowed disabled:opacity-40">{applyingWindows ? 'APPLYING…' : 'APPLY WINDOWS TWEAKS'}</button></div>
+      </section>
+
       <section className="rounded-2xl border border-white/5 bg-[#0d0d0d] p-6"><div className="flex items-center gap-4"><div className="rounded-xl bg-white/[0.06] p-3 text-white"><Icon name="shield" /></div><div><h3 className="font-semibold text-white">Privacy and permissions</h3><p className="mt-1 text-sm leading-6 text-[#777]">System changes run through the Electron main process. The React UI does not access Node.js, PowerShell, or the filesystem directly.</p></div></div></section>
     </div>
   );
