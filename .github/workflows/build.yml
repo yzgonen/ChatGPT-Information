@@ -1,0 +1,62 @@
+name: Build and Release Booster
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: booster-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-release:
+    name: Build Windows installer and publish release
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v7
+        with:
+          node-version: '20.x'
+
+      - name: Install workspace packages
+        run: npm install
+
+      - name: Build the Windows NSIS installer
+        run: npm run build
+
+      - name: Verify installer output
+        shell: pwsh
+        run: |
+          $installers = Get-ChildItem -Path 'release' -Filter '*.exe' -File -ErrorAction SilentlyContinue
+          if (-not $installers) {
+            throw 'No .exe installer was produced in the release directory.'
+          }
+          $installers | ForEach-Object { Write-Host "Found installer: $($_.FullName)" }
+
+      - name: Save installer as a downloadable workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Booster-Windows-Installer
+          path: release/*.exe
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Publish installer to the GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v3
+        with:
+          name: Booster ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: release/*.exe

@@ -1,0 +1,77 @@
+{
+  "name": "booster",
+  "version": "1.0.0",
+  "description": "A Windows performance dashboard for Booster.",
+  "productName": "Booster",
+  "main": "main.js",
+  "private": true,
+  "license": "UNLICENSED",
+  "scripts": {
+    "dev": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && electron .\"",
+    "start": "npm run dev",
+    "web:build": "vite build",
+    "build": "vite build && electron-builder --win nsis --x64",
+    "pack": "vite build && electron-builder --dir",
+    "dist:win": "npm run build"
+  },
+  "dependencies": {
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.7.0",
+    "autoprefixer": "^10.4.21",
+    "concurrently": "^9.2.0",
+    "electron": "^37.0.0",
+    "electron-builder": "^26.0.12",
+    "postcss": "^8.5.6",
+    "tailwindcss": "^3.4.17",
+    "vite": "^6.3.5",
+    "wait-on": "^8.0.3"
+  },
+  "build": {
+    "appId": "com.booster.desktop",
+    "productName": "Booster",
+    "asar": true,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "package.json",
+      "dist/**/*",
+      "!release/**"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "requestedExecutionLevel": "highestAvailable"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowElevation": true,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Booster",
+      "installerLanguages": [
+        "en_US",
+        "pt_BR",
+        "tr_TR"
+      ],
+      "multiLanguageInstaller": true,
+      "language": "1033",
+      "runAfterFinish": true,
+      "deleteAppDataOnUninstall": false,
+      "artifactName": "Booster-Setup-${version}.${ext}"
+    }
+  }
+}

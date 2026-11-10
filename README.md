@@ -1,15 +1,28 @@
-# ChatGPT Information
+# Booster
 
-This repository is the project reference for creating presentations, Word documents, and Minecraft thumbnails and builds.
+Booster is a Windows Electron application with a React and Tailwind dashboard for system maintenance and Fortnite settings.
 
-When I ask ChatGPT to work on one of these projects, use the matching guide below and check the relevant reference files in the repository first. Add project-specific preferences, examples, and assets to the matching section as they become available.
+## Development
 
-## Sections
+Install Node.js 20 and npm, then run:
 
-- [PowerPoint](PowerPoint/README.md) — presentation content and design preferences
-- [Word](Word/README.md) — document content and formatting preferences
-- [Minecraft Thumbnails and Builds](Minecraft%20Thumbnails%20and%20Builds/README.md) — Minecraft assets, builds, and thumbnail preferences
+```sh
+npm install
+npm run dev
+```
 
-## Adding information
+## Windows installer
 
-Put instructions and reference material in the relevant section. Keep sensitive information, passwords, and private account details out of this repository.
+Build the NSIS installer with:
+
+```sh
+npm run build
+```
+
+The installer is written to `release/`. Push a version tag such as `v1.0.0` to create a GitHub Release with the installer attached. The workflow also supports a manual Actions run.
+
+## Notes
+
+- The network panel requests Windows DNS and TCP configuration changes. ISP routing determines the actual game route and latency; the 145 ms value is an estimate, not a guarantee.
+- Standby-list clearing and some network changes may require administrator privileges.
+- Fortnite may ignore configuration values after game updates.
