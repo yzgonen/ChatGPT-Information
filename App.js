@@ -1,77 +1,53 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 
 const NAV_ITEMS = [
-  { id: 'home', label: 'Overview', icon: 'grid' },
-  { id: 'fortnite', label: 'Fortnite Performance', icon: 'gamepad' },
-  { id: 'connection', label: 'Connection Settings', icon: 'globe' },
-  { id: 'settings', label: 'General PC Settings', icon: 'sliders' }
+  { id: 'home', label: 'Dashboard', icon: 'grid' },
+  { id: 'latency', label: 'Latency', icon: 'bolt' },
+  { id: 'network', label: 'Network', icon: 'globe' },
+  { id: 'services', label: 'Services & Debloat', icon: 'shield' },
+  { id: 'games', label: 'Games & Apps', icon: 'gamepad' },
+  { id: 'storage', label: 'Storage Cleanup', icon: 'disk' },
+  { id: 'logs', label: 'Activity Logs', icon: 'activity' },
+  { id: 'settings', label: 'Settings', icon: 'sliders' }
 ];
 
+const SUBTABS = {
+  latency: ['Scheduling', 'Keyboard & Mouse', 'Power Plan', 'Controller'],
+  network: ['Routing & Ping', 'Packet Loss', 'Epic Downloads', 'Windows Tweaks'],
+  services: ['Telemetry & Diagnostics', 'Windows Bloatware'],
+  games: ['Fortnite Settings', 'Audio & Repair', 'Memory']
+};
+
 const PROFILE_OPTIONS = [
-  {
-    id: 'lobbyAnimations',
-    title: 'Strip Lobby Animations',
-    description: 'Reduce background motion in the lobby.',
-    setting: 'bShowLobbyBackground',
-    enabledValue: false,
-    disabledValue: true
-  },
-  {
-    id: 'mobileRenderPathway',
-    title: 'Mobile Render Pathway',
-    description: 'Request the ES31 rendering path. Fortnite may ignore unsupported values.',
-    setting: 'D3DRHIPreference',
-    enabledValue: 'ES31',
-    disabledValue: 'Default'
-  },
-  {
-    id: 'grassRemoval',
-    title: 'Absolute Grass Removal',
-    description: 'Disable grass where the current Fortnite build supports this setting.',
-    setting: 'bShowGrass',
-    enabledValue: false,
-    disabledValue: true
-  },
-  {
-    id: 'foliageMotion',
-    title: 'Reduce Tree / Plant Motion',
-    description: 'Set foliage quality to zero in the scalability profile.',
-    setting: 'sg.FoliageQuality',
-    enabledValue: 0,
-    disabledValue: 2
-  },
-  {
-    id: 'mouseAcceleration',
-    title: 'Disable Mouse Acceleration',
-    description: 'Write the requested Fortnite mouse setting when supported by the game.',
-    setting: 'bDisableMouseAcceleration',
-    enabledValue: true,
-    disabledValue: false
-  }
+  { id: 'lobbyAnimations', title: 'Lobby Stream Optimization', setting: 'bShowLobbyBackground', description: 'Reduce the lobby background animation where the current game build honors this setting.', caution: 'Game updates can ignore or rewrite this value.' },
+  { id: 'mobileRenderPathway', title: 'Mobile Rendering Path', setting: 'D3DRHIPreference', description: 'Request the ES31 rendering path. Fortnite may ignore unsupported values.' },
+  { id: 'grassRemoval', title: 'Grass Removal', setting: 'bShowGrass', description: 'Request reduced grass rendering where supported by this game build.' },
+  { id: 'foliageMotion', title: 'Foliage Quality Override', setting: 'sg.FoliageQuality', description: 'Set foliage quality to zero in the scalability profile.' },
+  { id: 'mouseAcceleration', title: 'Disable Mouse Acceleration', setting: 'bDisableMouseAcceleration', description: 'Write the selected mouse setting when supported by Fortnite.' }
 ];
 
 const NETWORK_OPTIONS = [
-  { id: 'tcpNoDelay', title: 'TCP No Delay', value: 'TCPNoDelay = 1', description: 'Request immediate transmission for eligible TCP traffic.' },
-  { id: 'tcpAckFrequency', title: 'TCP ACK Frequency', value: 'TCPAckFrequency = 1', description: 'Request prompt acknowledgements on the selected interface.' },
-  { id: 'disableThrottling', title: 'Disable Network Throttling', value: 'NetworkThrottlingIndex = ffffffff', description: 'Remove Windows multimedia network throttling.' },
-  { id: 'flushDns', title: 'Flush DNS Cache', value: 'ipconfig /flushdns', description: 'Clear the local resolver cache once when applying.' },
-  { id: 'cloudflareDns', title: 'Cloudflare DNS', value: '1.1.1.1 / 1.0.0.1', description: 'Set the selected adapter DNS servers to Cloudflare.' },
-  { id: 'tcpAutoTuning', title: 'TCP Auto-Tuning + ECN', value: 'autotuninglevel = normal · ecncapability = enabled', description: 'Set Windows receive-window auto-tuning to normal and enable ECN where supported.' }
+  { id: 'tcpNoDelay', title: 'TCPNoDelay', value: 'TCPNoDelay = 1', description: 'Affects eligible TCP traffic; Fortnite gameplay commonly uses UDP, so this is not a promised ping fix.' },
+  { id: 'tcpAckFrequency', title: 'TCPAckFrequency', value: 'TCPAckFrequency = 1', description: 'Changes TCP acknowledgements for the active adapter, not the game server route.' },
+  { id: 'disableThrottling', title: 'Windows Network Throttling', value: 'NetworkThrottlingIndex = ffffffff', description: 'Windows multimedia network policy. Results vary by workload.' },
+  { id: 'flushDns', title: 'Flush DNS Cache', value: 'ipconfig /flushdns', description: 'Clears cached name lookups; it does not reduce in-match ping by itself.' },
+  { id: 'cloudflareDns', title: 'Cloudflare DNS', value: '1.1.1.1 / 1.0.0.1', description: 'Changes DNS for the active adapter and can affect every app on this PC.' },
+  { id: 'tcpAutoTuning', title: 'TCP Auto-Tuning + ECN', value: 'normal · enabled', description: 'Windows TCP behavior; it is not a direct Fortnite UDP latency switch.' }
 ];
 
-const INITIAL_METRICS = {
-  cpu: null,
-  gpu: 0,
-  memoryUsed: 11,
-  memoryTotal: 15.8,
-  latency: null,
-  packetLoss: null,
-  adapter: 'Waiting for system telemetry'
-};
+const SERVICES = [
+  ['DiagTrack', 'Connected User Experiences and Telemetry', 'Telemetry service; review before changing.'],
+  ['WerSvc', 'Windows Error Reporting', 'Collects crash reports; disabling can reduce diagnostic data.'],
+  ['SysMain', 'SysMain / prefetching', 'Windows manages this automatically; test only if disk pressure is measured.'],
+  ['wuauserv', 'Windows Update', 'Keep enabled so security and driver updates can install.'],
+  ['WbioSrvc', 'Windows Biometric Service', 'Needed for fingerprint and biometric sign-in.']
+];
 
-function parseBridgeResult(result) {
-  if (typeof result !== 'string') return result || {};
-  try { return JSON.parse(result); } catch { return { message: result }; }
+const INITIAL_METRICS = { cpu: null, gpu: null, memoryUsed: null, memoryTotal: null, latency: null, packetLoss: null, adapter: 'No test run' };
+
+function parseResult(value) {
+  if (typeof value !== 'string') return value || {};
+  try { return JSON.parse(value); } catch { return { message: value }; }
 }
 
 function formatBytes(bytes) {
@@ -85,20 +61,7 @@ function formatBytes(bytes) {
 }
 
 function Icon({ name, size = 20, className = '' }) {
-  const common = {
-    width: size,
-    height: size,
-    viewBox: '0 0 24 24',
-    fill: 'none',
-    stroke: 'currentColor',
-    strokeWidth: 1.8,
-    strokeLinecap: 'round',
-    strokeLinejoin: 'round',
-    className,
-    'aria-hidden': true
-  };
-
-  const paths = {
+  const icons = {
     grid: <><rect x="3.5" y="3.5" width="7" height="7" rx="1.5" /><rect x="13.5" y="3.5" width="7" height="7" rx="1.5" /><rect x="3.5" y="13.5" width="7" height="7" rx="1.5" /><rect x="13.5" y="13.5" width="7" height="7" rx="1.5" /></>,
     gamepad: <><path d="M6.2 9.2h11.6a4.1 4.1 0 0 1 4 4.9l-.5 2.7a2.7 2.7 0 0 1-4.5 1.5l-2-1.8H9.2l-2 1.8a2.7 2.7 0 0 1-4.5-1.5l-.5-2.7a4.1 4.1 0 0 1 4-4.9Z" /><path d="M7 11.8v4M5 13.8h4M16.5 13h.01M19 15.5h.01" /></>,
     globe: <><circle cx="12" cy="12" r="9" /><path d="M3.5 12h17M12 3a14.5 14.5 0 0 1 0 18M12 3a14.5 14.5 0 0 0 0 18" /></>,
@@ -106,568 +69,211 @@ function Icon({ name, size = 20, className = '' }) {
     bolt: <path d="m13 2-9 12h7l-1 8 10-13h-7l1-7Z" />,
     arrow: <><path d="M5 12h14" /><path d="m13 6 6 6-6 6" /></>,
     check: <path d="m5 12 4 4L19 6" />,
-    clock: <><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></>,
-    cpu: <><rect x="6" y="6" width="12" height="12" rx="2" /><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4" /><path d="M10 10h4v4h-4z" /></>,
+    cpu: <><rect x="6" y="6" width="12" height="12" rx="2" /><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4" /></>,
     memory: <><rect x="3" y="7" width="18" height="10" rx="2" /><path d="M7 10v4M11 10v4M15 10v4M19 10v4M6 17v3M10 17v3M14 17v3M18 17v3" /></>,
     signal: <><path d="M3 20h2v-3H3zM8 20h2v-7H8zM13 20h2V9h-2zM18 20h2V4h-2z" /></>,
     shield: <><path d="M12 3 20 6v5c0 5-3.4 8.3-8 10-4.6-1.7-8-5-8-10V6l8-3Z" /><path d="m9 12 2 2 4-4" /></>,
     warning: <><path d="M12 3 2.8 19h18.4L12 3Z" /><path d="M12 9v4M12 16h.01" /></>,
     refresh: <><path d="M20 7v5h-5" /><path d="M4.7 9A8 8 0 0 1 19 6l1 1M4 17v-5h5" /><path d="M19.3 15A8 8 0 0 1 5 18l-1-1" /></>,
-    external: <><path d="M14 4h6v6M20 4l-9 9" /><path d="M18 13v5a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h5" /></>
+    disk: <><path d="M4 4h13l3 3v13H4z" /><path d="M8 4v6h8V4M8 20v-6h8v6" /></>,
+    activity: <><path d="M3 12h4l3-8 4 16 3-8h4" /></>,
+    sound: <><path d="M4 10v4h4l5 4V6l-5 4H4Z" /><path d="M17 9a5 5 0 0 1 0 6M19 6a9 9 0 0 1 0 12" /></>,
+    controller: <><path d="M6 9h12a4 4 0 0 1 3.8 5.3l-.7 2.4a2 2 0 0 1-3.2 1l-2.2-1.8H8.3l-2.2 1.8a2 2 0 0 1-3.2-1l-.7-2.4A4 4 0 0 1 6 9Z" /><path d="M7 11v4M5 13h4M16 12h.01M18.5 14.5h.01" /></>
   };
+  return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className={className} aria-hidden="true">{icons[name] || icons.grid}</svg>;
+}
 
-  return <svg {...common}>{paths[name] || paths.grid}</svg>;
+function Pill({ children, tone = 'neutral' }) {
+  const colors = { neutral: 'border-white/10 bg-white/[0.04] text-[#aaa]', green: 'border-emerald-400/15 bg-emerald-400/[0.07] text-emerald-300', amber: 'border-amber-400/15 bg-amber-400/[0.07] text-amber-200', red: 'border-rose-400/15 bg-rose-400/[0.07] text-rose-200' };
+  return <span className={`inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-semibold tracking-wide ${colors[tone]}`}><span className={`h-1.5 w-1.5 rounded-full ${tone === 'green' ? 'bg-emerald-400' : tone === 'amber' ? 'bg-amber-300' : tone === 'red' ? 'bg-rose-300' : 'bg-[#777]'}`} />{children}</span>;
 }
 
 function Toggle({ checked, onChange, label, disabled = false }) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={checked}
-      aria-label={label}
-      disabled={disabled}
-      onClick={onChange}
-      className={`relative h-8 w-[56px] shrink-0 rounded-full border transition-colors duration-200 ease-out focus:outline-none focus:ring-2 focus:ring-white/30 disabled:cursor-not-allowed disabled:opacity-40 ${checked ? 'border-white bg-white' : 'border-white/10 bg-[#202020]'}`}
-    >
-      <span className={`absolute left-[3px] top-[3px] h-6 w-6 rounded-full transition-transform duration-200 ease-out ${checked ? 'translate-x-6 bg-black' : 'translate-x-0 bg-[#858585]'}`} />
-    </button>
-  );
+  return <button type="button" role="switch" aria-checked={checked} aria-label={label} disabled={disabled} onClick={onChange} className={`relative h-8 w-[56px] shrink-0 rounded-full border transition-colors duration-200 ease-out focus:outline-none focus:ring-2 focus:ring-white/30 disabled:cursor-not-allowed disabled:opacity-40 ${checked ? 'border-white bg-white' : 'border-white/10 bg-[#202020]'}`}><span className={`absolute left-[3px] top-[3px] h-6 w-6 rounded-full transition-transform duration-200 ease-out ${checked ? 'translate-x-6 bg-black' : 'translate-x-0 bg-[#858585]'}`} /></button>;
 }
 
-function MetricCard({ label, value, suffix, icon, detail, percent }) {
-  const showProgress = Number.isFinite(percent);
-  return (
-    <div className="rounded-2xl border border-white/5 bg-[#0d0d0d] p-6">
-      <div className="flex items-start justify-between">
-        <div>
-          <p className="text-sm font-semibold uppercase tracking-[0.16em] text-[#777]">{label}</p>
-          <p className="mt-4 text-[34px] font-semibold leading-none tracking-[-0.04em] text-white">
-            {value ?? '—'}<span className="ml-1 text-lg font-medium text-[#8a8a8a]">{value == null ? '' : suffix}</span>
-          </p>
-        </div>
-        <div className="rounded-xl border border-white/5 bg-[#151515] p-3 text-[#c8c8c8]"><Icon name={icon} size={22} /></div>
-      </div>
-      {showProgress ? (
-        <div className="mt-6 h-2 overflow-hidden rounded-full bg-[#202020]">
-          <div className="h-full rounded-full bg-white transition-all duration-500" style={{ width: `${Math.max(0, Math.min(100, percent))}%` }} />
-        </div>
-      ) : <div className="mt-6 h-2 rounded-full bg-[#202020]" />}
-      <p className="mt-3 text-sm text-[#747474]">{detail}</p>
-    </div>
-  );
+function Card({ children, className = '' }) {
+  return <section className={`rounded-2xl border border-white/5 bg-[#0d0d0d] p-6 ${className}`}>{children}</section>;
 }
 
-function StatusPill({ children, tone = 'neutral' }) {
-  const tones = {
-    neutral: 'border-white/10 bg-white/[0.04] text-[#aaa]',
-    green: 'border-emerald-400/15 bg-emerald-400/[0.07] text-emerald-300',
-    amber: 'border-amber-400/15 bg-amber-400/[0.07] text-amber-200'
-  };
-  return <span className={`inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-semibold tracking-wide ${tones[tone]}`}><span className={`h-1.5 w-1.5 rounded-full ${tone === 'green' ? 'bg-emerald-400' : tone === 'amber' ? 'bg-amber-300' : 'bg-[#777]'}`} />{children}</span>;
+function MetricCard({ label, value, suffix = '', icon, detail, percent }) {
+  return <Card><div className="flex items-start justify-between"><div><p className="text-xs font-bold uppercase tracking-[0.16em] text-[#777]">{label}</p><p className="mt-4 text-3xl font-semibold tracking-[-0.04em] text-white">{value ?? '—'}<span className="ml-1 text-base font-medium text-[#858585]">{value == null ? '' : suffix}</span></p></div><span className="rounded-xl border border-white/5 bg-[#151515] p-3 text-[#ccc]"><Icon name={icon} /></span></div><div className="mt-5 h-2 overflow-hidden rounded-full bg-[#202020]"><div className="h-full rounded-full bg-white transition-all duration-500" style={{ width: `${Number.isFinite(percent) ? Math.max(0, Math.min(100, percent)) : 0}%` }} /></div><p className="mt-3 text-sm text-[#777]">{detail}</p></Card>;
 }
 
 function App() {
   const [activeTab, setActiveTab] = useState('home');
-  const [optimizing, setOptimizing] = useState(false);
-  const [applyingProfile, setApplyingProfile] = useState(false);
-  const [applyingNetwork, setApplyingNetwork] = useState(false);
-  const [applyingWindows, setApplyingWindows] = useState(false);
+  const [activeSubtab, setActiveSubtab] = useState({ latency: 'Scheduling', network: 'Routing & Ping', services: 'Telemetry & Diagnostics', games: 'Fortnite Settings' });
+  const [metrics, setMetrics] = useState(INITIAL_METRICS);
+  const [logs, setLogs] = useState([{ id: 1, time: new Date(), level: 'INFO', message: 'Booster ready. Live telemetry will appear here.' }]);
+  const [toast, setToast] = useState(null);
+  const [busy, setBusy] = useState('');
+  const [profile, setProfile] = useState(Object.fromEntries(PROFILE_OPTIONS.map((x) => [x.id, false])));
+  const [network, setNetwork] = useState(Object.fromEntries(NETWORK_OPTIONS.map((x) => [x.id, false])));
   const [windowsTweaks, setWindowsTweaks] = useState({ win32PriorityThreads: false, disableGameDvr: false });
   const [windowsTouched, setWindowsTouched] = useState({});
-  const [optimizingCpu, setOptimizingCpu] = useState(false);
-  const [scanningMemory, setScanningMemory] = useState(false);
   const [memoryProcesses, setMemoryProcesses] = useState([]);
+  const [selectedProcess, setSelectedProcess] = useState('');
+  const [memoryTargetPercent, setMemoryTargetPercent] = useState(20);
+  const [controllerStatus, setControllerStatus] = useState(null);
+  const [serviceStatus, setServiceStatus] = useState(null);
+  const [networkCheck, setNetworkCheck] = useState(null);
   const [storageOverview, setStorageOverview] = useState(null);
   const [cleanupScan, setCleanupScan] = useState(null);
   const [cleanupSelection, setCleanupSelection] = useState({});
-  const [scanningDrive, setScanningDrive] = useState(null);
-  const [deletingCleanup, setDeletingCleanup] = useState(false);
-  const [profile, setProfile] = useState({
-    lobbyAnimations: false,
-    mobileRenderPathway: false,
-    grassRemoval: false,
-    foliageMotion: false,
-    mouseAcceleration: false
-  });
-  const [network, setNetwork] = useState(Object.fromEntries(NETWORK_OPTIONS.map((item) => [item.id, true])));
-  const [metrics, setMetrics] = useState(INITIAL_METRICS);
-  const [logs, setLogs] = useState([
-    { id: 1, time: new Date(), level: 'INFO', message: 'Booster dashboard initialized.' },
-    { id: 2, time: new Date(), level: 'INFO', message: 'System profile: i5-8400 · GTX 1060 6 GB · 16 GB RAM.' },
-    { id: 3, time: new Date(), level: 'WAIT', message: 'Waiting for live telemetry from the main process.' }
-  ]);
-  const [toast, setToast] = useState(null);
+  const [driveBusy, setDriveBusy] = useState('');
   const bridge = typeof window !== 'undefined' ? window.booster : undefined;
 
-  const appendLog = useCallback((message, level = 'INFO') => {
-    setLogs((current) => [...current, { id: `${Date.now()}-${Math.random()}`, time: new Date(), level, message: String(message) }].slice(-120));
-  }, []);
-
+  const addLog = useCallback((message, level = 'INFO') => setLogs((items) => [...items, { id: `${Date.now()}-${Math.random()}`, time: new Date(), level, message: String(message) }].slice(-250)), []);
   const notify = useCallback((message, tone = 'neutral') => {
     setToast({ message, tone });
     window.clearTimeout(notify.timer);
-    notify.timer = window.setTimeout(() => setToast(null), 3800);
+    notify.timer = window.setTimeout(() => setToast(null), 4000);
   }, []);
-
-  useEffect(() => {
-    if (!bridge?.onLog) return undefined;
-    const unsubscribe = bridge.onLog((entry) => {
-      if (typeof entry === 'string') appendLog(entry);
-      else if (entry) appendLog(entry.message || JSON.stringify(entry), entry.level || 'INFO');
-    });
-    return typeof unsubscribe === 'function' ? unsubscribe : undefined;
-  }, [bridge, appendLog]);
-
-  useEffect(() => {
-    if (!bridge?.onHardwareMetrics) return undefined;
-    const unsubscribe = bridge.onHardwareMetrics((snapshot) => {
-      if (snapshot && typeof snapshot === 'object') setMetrics((current) => ({ ...current, ...snapshot }));
-    });
-    return typeof unsubscribe === 'function' ? unsubscribe : undefined;
+  const call = useCallback(async (method, ...args) => {
+    if (typeof bridge?.[method] !== 'function') throw new Error(`This build does not yet provide ${method}.`);
+    return bridge[method](...args);
   }, [bridge]);
 
   useEffect(() => {
-    let mounted = true;
-    if (!bridge?.getStorageOverview) return undefined;
-    bridge.getStorageOverview().then((result) => {
-      if (mounted) setStorageOverview(result);
-    }).catch((error) => {
-      if (mounted) appendLog(`Drive information unavailable: ${error.message}`, 'WARN');
-    });
-    return () => { mounted = false; };
-  }, [bridge, appendLog]);
-
+    if (!bridge?.onLog) return undefined;
+    const unsubscribe = bridge.onLog((entry) => entry && addLog(entry.message || String(entry), entry.level || 'INFO'));
+    return typeof unsubscribe === 'function' ? unsubscribe : undefined;
+  }, [bridge, addLog]);
   useEffect(() => {
-    const node = document.getElementById('booster-console-end');
-    node?.scrollIntoView({ behavior: 'auto', block: 'nearest' });
-  }, [logs]);
+    if (!bridge?.onHardwareMetrics) return undefined;
+    const unsubscribe = bridge.onHardwareMetrics((data) => data && setMetrics((previous) => ({ ...previous, ...data })));
+    return typeof unsubscribe === 'function' ? unsubscribe : undefined;
+  }, [bridge]);
+  useEffect(() => {
+    let alive = true;
+    call('getStorageOverview').then((data) => alive && setStorageOverview(data)).catch((error) => alive && addLog(`Drive information: ${error.message}`, 'WARN'));
+    return () => { alive = false; };
+  }, [call, addLog]);
 
-  const activeIndex = Math.max(0, NAV_ITEMS.findIndex((item) => item.id === activeTab));
-  const activeTitle = NAV_ITEMS[activeIndex]?.label || 'Overview';
-  const memoryPercent = Number.isFinite(metrics.memoryUsed) && Number.isFinite(metrics.memoryTotal) && metrics.memoryTotal > 0
-    ? (metrics.memoryUsed / metrics.memoryTotal) * 100
-    : null;
+  const active = NAV_ITEMS.find((item) => item.id === activeTab) || NAV_ITEMS[0];
+  const memoryPercent = metrics.memoryUsed != null && metrics.memoryTotal ? (metrics.memoryUsed / metrics.memoryTotal) * 100 : null;
+  const selectedCount = cleanupScan?.items?.filter((item) => cleanupSelection[item.id]).length || 0;
+  const selectedBytes = cleanupScan?.items?.filter((item) => cleanupSelection[item.id]).reduce((sum, item) => sum + item.bytes, 0) || 0;
 
-  const profilePayload = useMemo(() => {
-    const payload = {};
-    for (const option of PROFILE_OPTIONS) payload[option.id] = Boolean(profile[option.id]);
-    return payload;
-  }, [profile]);
-
-  const callBridge = async (methodName, ...args) => {
-    const method = bridge?.[methodName];
-    if (typeof method !== 'function') {
-      const message = `Main-process bridge method “${methodName}” is not available yet.`;
-      appendLog(message, 'WARN');
-      notify('This action needs its main-process and preload bridge handler.', 'amber');
-      throw new Error(message);
-    }
-    return method(...args);
-  };
-
-  const runOptimizer = async () => {
-    if (optimizing) return;
-    setOptimizing(true);
-    appendLog('One-click optimizer requested.', 'ACTION');
+  const run = async (key, label, fn, success = 'Done.') => {
+    if (busy) return;
+    setBusy(key);
+    addLog(label, 'ACTION');
     try {
-      const result = await callBridge('runOptimizer');
-      for (const item of result?.results || []) {
-        appendLog(item.ok ? `${item.name}: ${typeof item.details === 'string' ? item.details : JSON.stringify(item.details)}` : `${item.name}: ${item.error}`, item.ok ? 'OK' : 'WARN');
-      }
-      notify(result?.ok ? 'Optimization sequence completed.' : 'Sequence completed with some steps unavailable.', result?.ok ? 'green' : 'amber');
+      const result = parseResult(await fn());
+      if (Array.isArray(result.results)) result.results.forEach((item) => addLog(`${item.name || item.id}: ${item.message || item.error || 'completed'}`, item.ok ? 'OK' : 'WARN'));
+      else if (result.message) addLog(result.message, result.ok === false ? 'WARN' : 'OK');
+      notify(result.ok === false ? 'Completed with some limitations. See Activity Logs.' : success, result.ok === false ? 'amber' : 'green');
+      return result;
     } catch (error) {
-      appendLog(error.message, 'ERROR');
-    } finally {
-      setOptimizing(false);
-    }
+      addLog(error.message, 'ERROR');
+      notify(error.message, 'amber');
+      return null;
+    } finally { setBusy(''); }
   };
 
-  const launchFortnite = async () => {
-    appendLog('Fortnite launch requested through the Epic Games protocol.', 'ACTION');
-    try {
-      await callBridge('launchFortnite');
-      appendLog('Epic Games launch protocol handed to Windows.', 'OK');
-      notify('Fortnite launch request sent.', 'green');
-    } catch (error) {
-      appendLog(error.message, 'ERROR');
-    }
+  const launchFortnite = () => run('launch', 'Fortnite launch requested.', () => call('launchFortnite'), 'Fortnite launch request sent to Epic.');
+  const optimizeSystem = () => run('optimizer', 'Running the selected system maintenance sequence.', () => call('runOptimizer'), 'System sequence completed. Review Activity Logs.');
+  const applyProfile = () => run('profile', 'Applying Fortnite profile (backup first).', () => call('updateFortniteSettings', profile), 'Fortnite profile applied with backup.');
+  const applyNetwork = () => run('network', 'Applying the selected Windows network options.', () => call('runNetworkOptimization', { options: NETWORK_OPTIONS.filter((item) => network[item.id]).map((item) => item.id), dns: ['1.1.1.1', '1.0.0.1'] }), 'Selected network changes applied.');
+  const applyWindows = () => run('windows', 'Applying selected Windows settings.', async () => {
+    const selected = Object.fromEntries(Object.keys(windowsTouched).map((key) => [key, windowsTweaks[key]]));
+    const result = parseResult(await call('applyWindowsTweaks', selected));
+    if (result.backupPath) addLog(`Backup saved: ${result.backupPath}`, 'INFO');
+    if (result.ok) setWindowsTouched({});
+    return result;
+  }, 'Selected Windows settings applied.');
+  const optimizeCpu = () => run('cpu', 'Applying the reversible CPU power profile.', () => call('optimizeCpu'), 'CPU power profile applied; monitor temperature and noise.');
+  const scanMemory = async () => {
+    const result = await run('memory', 'Scanning large background processes.', () => call('scanBackgroundMemory'), 'Memory scan finished.');
+    if (result) { setMemoryProcesses(Array.isArray(result.processes) ? result.processes : []); setSelectedProcess(result.processes?.[0]?.ProcessName || ''); }
   };
-
-  const applyProfile = async () => {
-    if (applyingProfile) return;
-    setApplyingProfile(true);
-    appendLog('Applying selected Fortnite profile values.', 'ACTION');
-    try {
-      const result = await callBridge('updateFortniteSettings', profilePayload);
-      appendLog(result?.changed ? `Fortnite profile saved. Backup: ${result.backupPath || 'created'}` : (result?.message || 'Fortnite profile already matches.'), result?.changed ? 'OK' : 'INFO');
-      notify('Fortnite profile settings sent.', 'green');
-    } catch (error) {
-      appendLog(error.message, 'ERROR');
-    } finally {
-      setApplyingProfile(false);
-    }
+  const scanController = async () => {
+    const result = await run('controller', 'Checking USB game controllers.', () => call('scanController'), 'Controller scan completed.');
+    if (result) setControllerStatus(result);
   };
-
-  const runNetworkOptimization = async () => {
-    if (applyingNetwork) return;
-    setApplyingNetwork(true);
-    appendLog('Windows network optimization requested. Review the selected changes before applying.', 'ACTION');
-    try {
-      const selectedOptions = NETWORK_OPTIONS.filter((item) => network[item.id]).map((item) => item.id);
-      const result = await callBridge('runNetworkOptimization', { options: selectedOptions, dns: ['1.1.1.1', '1.0.0.1'], region: 'Frankfurt, Germany', latencyTargetMs: 145 });
-      for (const item of result?.results || []) appendLog(`${item.name}: ${item.message || item.error || 'completed'}`, item.ok ? 'OK' : 'WARN');
-      notify(result?.ok ? 'Selected network changes applied.' : 'Network sequence finished with reported limitations.', result?.ok ? 'green' : 'amber');
-    } catch (error) {
-      appendLog(error.message, 'ERROR');
-    } finally {
-      setApplyingNetwork(false);
-    }
+  const scanServices = async () => {
+    const result = await run('services', 'Reading Windows service states (read-only).', () => call('getServiceStatus'), 'Service status scan completed.');
+    if (result) setServiceStatus(result.services || []);
   };
-
-  const runCpuOptimization = async () => {
-    if (optimizingCpu) return;
-    setOptimizingCpu(true);
-    appendLog('CPU dynamic core performance requested.', 'ACTION');
-    try {
-      const result = parseBridgeResult(await callBridge('optimizeCpu'));
-      appendLog(result.message || `CPU power profile updated. Backup: ${result.backupPath || 'saved'}`, 'OK');
-      notify('CPU performance profile applied.', 'green');
-    } catch (error) {
-      appendLog(error.message, 'ERROR');
-    } finally {
-      setOptimizingCpu(false);
-    }
+  const testConnection = async () => {
+    const result = await run('ping', 'Measuring gateway and public ICMP response (not a game-server test).', () => call('measureNetworkQuality'), 'Connection sample completed.');
+    if (result) { setNetworkCheck(result); setMetrics((current) => ({ ...current, latency: result.internet?.averageMs ?? null, packetLoss: result.internet?.lossPercent ?? null, adapter: 'ICMP to public test host' })); }
   };
-
-  const scanBackgroundMemory = async () => {
-    if (scanningMemory) return;
-    setScanningMemory(true);
-    appendLog('Background memory scan requested.', 'ACTION');
+  const scanDrive = async (letter) => {
+    if (driveBusy) return;
+    setDriveBusy(letter); setCleanupScan(null); setCleanupSelection({});
+    addLog(`Scanning user-review areas on ${letter}:.`, 'ACTION');
     try {
-      const result = parseBridgeResult(await callBridge('scanBackgroundMemory'));
-      const rows = Array.isArray(result.processes) ? result.processes : [];
-      setMemoryProcesses(rows);
-      appendLog(result.message || `Background scan found ${rows.length} candidate process(es).`, 'INFO');
-      for (const process of rows) appendLog(`${process.ProcessName || process.processName || 'Process'} · ${process.MemoryMB ?? process.memoryMB ?? '?'} MB · PID ${process.Id ?? process.id ?? '?'}`, 'INFO');
-      notify(`Scan complete: ${rows.length} background process(es) listed.`, 'green');
-    } catch (error) {
-      appendLog(error.message, 'ERROR');
-    } finally {
-      setScanningMemory(false);
-    }
-  };
-
-  const scanStorageDrive = async (letter) => {
-    if (scanningDrive || deletingCleanup) return;
-    setScanningDrive(letter);
-    setCleanupSelection({});
-    setCleanupScan(null);
-    appendLog(`Scanning selected cleanup areas on ${letter}:`, 'ACTION');
-    try {
-      const result = await callBridge('scanDriveCleanup', letter);
+      const result = await call('scanDriveCleanup', letter);
       setCleanupScan(result);
-      appendLog(`${letter}: scan found ${result.candidateCount} candidate file(s); ${formatBytes(result.candidateBytes)} total.`, 'INFO');
-      if (result.truncated) notify('Scan limit reached; results are partial. Narrow the scan before continuing.', 'amber');
-      else notify(`${letter}: scan complete. Review every path before selecting files.`, 'green');
-    } catch (error) {
-      appendLog(error.message, 'ERROR');
-      notify(`Could not scan ${letter}:`, 'amber');
-    } finally {
-      setScanningDrive(null);
-    }
+      addLog(`${letter}: scan found ${result.candidateCount} candidates (${formatBytes(result.candidateBytes)}).`, 'INFO');
+      notify(`Drive ${letter}: scan complete. Review every path.`, 'green');
+    } catch (error) { addLog(error.message, 'ERROR'); notify(error.message, 'amber'); }
+    finally { setDriveBusy(''); }
   };
-
-  const removeSelectedCleanup = async () => {
-    const selectedIds = Object.keys(cleanupSelection).filter((id) => cleanupSelection[id]);
-    if (!selectedIds.length || deletingCleanup) return;
-    setDeletingCleanup(true);
-    try {
-      const result = await callBridge('deleteCleanupCandidates', { ids: selectedIds });
-      if (result.cancelled) {
-        notify('No files were moved.', 'neutral');
-        return;
-      }
-      const failed = (result.results || []).filter((item) => !item.ok);
-      for (const item of result.results || []) appendLog(`${item.name}: ${item.message}`, item.ok ? 'OK' : 'WARN');
-      notify(`${result.deletedCount} file(s) moved to the Recycle Bin${failed.length ? `; ${failed.length} could not be moved` : ''}.`, failed.length ? 'amber' : 'green');
+  const removeSelected = async () => {
+    const ids = Object.keys(cleanupSelection).filter((id) => cleanupSelection[id]);
+    if (!ids.length || busy) return;
+    const result = await run('delete', `Requesting confirmation to move ${ids.length} selected file(s) to Recycle Bin.`, () => call('deleteCleanupCandidates', { ids }), 'Selected files moved to Recycle Bin.');
+    if (result && !result.cancelled) {
       setCleanupSelection({});
       if (cleanupScan?.drive) {
-        const [freshScan, freshOverview] = await Promise.all([
-          callBridge('scanDriveCleanup', cleanupScan.drive),
-          callBridge('getStorageOverview')
-        ]);
-        setCleanupScan(freshScan);
-        setStorageOverview(freshOverview);
+        try { setCleanupScan(await call('scanDriveCleanup', cleanupScan.drive)); setStorageOverview(await call('getStorageOverview')); } catch (error) { addLog(error.message, 'WARN'); }
       }
-    } catch (error) {
-      appendLog(error.message, 'ERROR');
-      notify('The selected files were not moved.', 'amber');
-    } finally {
-      setDeletingCleanup(false);
     }
   };
+  const selectSafeTemps = () => {
+    const safe = cleanupScan?.items?.filter((item) => item.category === 'temporary' && item.safeToDelete) || [];
+    setCleanupSelection(Object.fromEntries(safe.map((item) => [item.id, true])));
+    notify(`${safe.length} older temporary file(s) selected for review. Nothing was deleted.`, 'neutral');
+  };
+  const updateSubtab = (name) => setActiveSubtab((current) => ({ ...current, [activeTab]: name }));
 
-  const applyWindowsSettings = async () => {
-    if (applyingWindows) return;
-    const selected = Object.fromEntries(Object.keys(windowsTouched).map((key) => [key, windowsTweaks[key]]));
-    if (!Object.keys(selected).length) return;
-    setApplyingWindows(true);
-    appendLog('Applying selected Windows system settings.', 'ACTION');
-    try {
-      const result = parseBridgeResult(await callBridge('applyWindowsTweaks', selected));
-      for (const item of result.results || []) appendLog(`${item.name}: ${item.message || item.error || 'completed'}`, item.ok ? 'OK' : 'WARN');
-      if (result.backupPath) appendLog(`Windows settings backup saved: ${result.backupPath}`, 'INFO');
-      if (result.ok) {
-        setWindowsTouched({});
-        notify('Selected Windows settings applied.', 'green');
-      } else notify('Some Windows settings could not be applied.', 'amber');
-    } catch (error) {
-      appendLog(error.message, 'ERROR');
-    } finally {
-      setApplyingWindows(false);
-    }
+  const logColor = (level) => ({ OK: 'text-emerald-300', INFO: 'text-[#a2a2a2]', ACTION: 'text-sky-300', WARN: 'text-amber-200', ERROR: 'text-rose-300' }[level] || 'text-[#888]');
+  const timeText = (time) => new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).format(time instanceof Date ? time : new Date(time));
+
+  const sectionHeader = (eyebrow, title, body) => <div className="mb-6"><Pill>{eyebrow}</Pill><h2 className="mt-4 text-3xl font-semibold tracking-[-0.045em] text-white">{title}</h2><p className="mt-2 max-w-3xl text-sm leading-6 text-[#858585]">{body}</p></div>;
+  const subnav = (tab) => <div className="mb-6 flex flex-wrap gap-2 rounded-xl border border-white/5 bg-[#080808] p-1.5">{SUBTABS[tab].map((label) => <button key={label} type="button" onClick={() => updateSubtab(label)} className={`rounded-lg px-4 py-2.5 text-sm font-semibold transition-all duration-200 ease-out ${activeSubtab[tab] === label ? 'bg-[#1a1a1a] text-white shadow-sm' : 'text-[#777] hover:text-white'}`}>{label}</button>)}</div>;
+  const optionCard = (title, description, right, code = '') => <Card key={title} className="flex flex-wrap items-center gap-5"><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-3"><h3 className="font-semibold text-white">{title}</h3>{code && <code className="rounded-md border border-white/5 bg-black/40 px-2 py-1 text-[11px] text-[#999]">{code}</code>}</div><p className="mt-2 text-sm leading-6 text-[#777]">{description}</p></div>{right}</Card>;
+
+  const dashboard = () => <div className="space-y-7">
+    <Card className="relative overflow-hidden p-8 md:p-10"><div className="pointer-events-none absolute -right-10 -top-24 h-72 w-72 rounded-full bg-white/[0.035] blur-3xl"/><div className="relative flex flex-col justify-between gap-7 lg:flex-row lg:items-end"><div className="max-w-2xl"><Pill tone="green">READY FOR YOUR NEXT SESSION</Pill><h2 className="mt-6 text-4xl font-semibold leading-tight tracking-[-0.055em] text-white md:text-5xl">A smoother session<br/>starts with a clear view.</h2><p className="mt-4 max-w-xl text-base leading-7 text-[#888]">Review the parts of your PC that can affect stutter, storage, audio, and connection stability.</p></div><button onClick={optimizeSystem} disabled={Boolean(busy)} className="flex min-h-16 items-center justify-between gap-6 rounded-xl bg-white px-6 text-left font-bold text-black transition-colors hover:bg-[#ddd] disabled:opacity-50"><span>{busy==='optimizer'?'RUNNING…':'RUN SYSTEM SEQUENCE'}</span><Icon name="bolt"/></button></div><p className="relative mt-6 border-t border-white/5 pt-4 text-xs leading-5 text-[#777]">The sequence applies a reversible CPU power-plan profile and lists large background memory users. It does not terminate apps or clear shader caches.</p></Card>
+    <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4"><MetricCard label="CPU" value={metrics.cpu} suffix="%" icon="cpu" detail="Intel Core i5-8400 · 6 cores" percent={metrics.cpu}/><MetricCard label="GPU" value={metrics.gpu} suffix="%" icon="signal" detail="NVIDIA GTX 1060 · 6 GB" percent={metrics.gpu}/><MetricCard label="Memory" value={metrics.memoryUsed} suffix={metrics.memoryTotal ? ` / ${metrics.memoryTotal} GB` : ' GB'} icon="memory" detail="System use; per-app targets are advisory" percent={memoryPercent}/><Card><p className="text-xs font-bold uppercase tracking-[0.16em] text-[#777]">Connection sample</p><p className="mt-4 text-3xl font-semibold text-white">{metrics.latency == null ? '—' : `${metrics.latency} ms`}</p><p className="mt-3 text-sm text-[#777]">{metrics.packetLoss == null ? 'Run a test; ICMP is not game-server ping.' : `${metrics.packetLoss}% loss to public test host`}</p></Card></div>
+    <div className="grid gap-4 md:grid-cols-2"><button onClick={() => { setActiveTab('network'); setActiveSubtab((s) => ({...s, network:'Routing & Ping'})); }} className="rounded-2xl border border-white/5 bg-[#0d0d0d] p-6 text-left transition-colors hover:border-white/10"><Icon name="globe"/><h3 className="mt-4 font-semibold">Connection health</h3><p className="mt-2 text-sm text-[#777]">Sample packet loss and check Epic download conditions.</p></button><button onClick={() => setActiveTab('storage')} className="rounded-2xl border border-white/5 bg-[#0d0d0d] p-6 text-left transition-colors hover:border-white/10"><Icon name="disk"/><h3 className="mt-4 font-semibold">Free up SSD space</h3><p className="mt-2 text-sm text-[#777]">Review large files on C: and D: and decide what to remove.</p></button></div>
+  </div>;
+
+  const latencyView = () => <div>{sectionHeader('INPUT & FRAME RESPONSE', 'Latency', 'Review input, CPU scheduling, power policy, and wired controller status. Changes are explicit and can be reverted where supported.')}{subnav('latency')}{activeSubtab.latency === 'Scheduling' ? <div className="space-y-4">{optionCard('Win32PrioritySeparation Quantum Tuning','Set Win32PrioritySeparation to 0x26 (38 decimal). Windows scheduling results vary; the previous registry values are backed up.',<Toggle checked={windowsTweaks.win32PriorityThreads} onChange={() => {setWindowsTweaks((v)=>({...v,win32PriorityThreads:!v.win32PriorityThreads}));setWindowsTouched((v)=>({...v,win32PriorityThreads:true}));}} label="Win32 priority tuning"/>,'HKLM\\...\\PriorityControl')}{optionCard('Windows GameDVR Capture','Turn off background game capture for this account and policy. This can affect Windows recording features.',<Toggle checked={windowsTweaks.disableGameDvr} onChange={() => {setWindowsTweaks((v)=>({...v,disableGameDvr:!v.disableGameDvr}));setWindowsTouched((v)=>({...v,disableGameDvr:true}));}} label="Disable GameDVR"/>,'GameDVR_Enabled = 0')}{Object.keys(windowsTouched).length>0&&<div className="flex justify-end"><button onClick={applyWindows} disabled={Boolean(busy)} className="rounded-xl bg-white px-5 py-3 text-sm font-bold text-black disabled:opacity-50">{busy==='windows'?'APPLYING…':'APPLY SELECTED TWEAKS'}</button></div>}<Card><h3 className="font-semibold">Measured, reversible changes</h3><p className="mt-2 text-sm leading-6 text-[#777]">Booster does not overclock the i5-8400. It can apply the power-plan profile below, but sustained 100% minimum processor state may increase power use and heat.</p></Card></div> : null}{activeSubtab.latency === 'Keyboard & Mouse' ? <div className="space-y-4">{optionCard('Disable Mouse Acceleration','For a raw 1:1 pointer response, Windows mouse acceleration can be disabled through the Fortnite profile or Windows pointer settings.',<button onClick={()=>run('mouse','Opening Windows mouse settings.',()=>call('openMouseSettings'),'Windows mouse settings opened.')} className="rounded-lg border border-white/10 px-4 py-2 text-xs font-bold">OPEN SETTINGS</button>)}<Card><h3 className="font-semibold">Mouse acceleration</h3><p className="mt-2 text-sm text-[#777]">The Fortnite profile toggle writes the requested setting to GameUserSettings.ini when the game supports it.</p></Card></div> : null}{activeSubtab.latency === 'Power Plan' ? <div className="space-y-4">{optionCard('CPU Dynamic Core Performance','Set the active plan’s minimum processor state and core parking policy to a performance-oriented value. A backup is saved; this is not an overclock.',<button onClick={optimizeCpu} disabled={Boolean(busy)} className="rounded-lg bg-white px-4 py-3 text-xs font-bold text-black disabled:opacity-50">{busy==='cpu'?'APPLYING…':'APPLY CPU PROFILE'}</button>)}<Card><p className="text-sm leading-6 text-amber-100/80">This may increase temperature, fan noise, and power use. Watch system temperatures during play and restore the original power plan if needed.</p></Card></div> : null}{activeSubtab.latency === 'Controller' ? <div className="space-y-4"><Card><div className="flex flex-wrap items-center justify-between gap-4"><div><h3 className="font-semibold">Wired PlayStation controller</h3><p className="mt-2 text-sm text-[#777]">Check whether Windows currently sees a USB controller. This can’t stop a bad cable, port, or device from disconnecting.</p></div><button onClick={scanController} disabled={Boolean(busy)} className="rounded-lg border border-white/10 px-4 py-3 text-xs font-bold">{busy==='controller'?'CHECKING…':'DETECT USB CONTROLLER'}</button></div>{controllerStatus&&<div className="mt-5 space-y-2">{controllerStatus.devices?.length?controllerStatus.devices.map((device)=><div key={device.instanceId||device.name} className="flex justify-between gap-3 rounded-lg bg-black/40 p-3 text-sm"><span>{device.name}</span><Pill tone="green">PRESENT</Pill></div>):<p className="rounded-lg bg-black/40 p-3 text-sm text-[#888]">No matching controller was detected. Reconnect the cable and scan again.</p>}</div>}</Card><Card><h3 className="font-semibold">Game input compatibility</h3><p className="mt-2 text-sm leading-6 text-[#777]">A game may expect XInput while a DualShock 4 exposes a different input interface. Booster checks detection and status; it does not install a filter driver or promise lower latency.</p></Card></div> : null}</div>;
+
+  const networkView = () => <div>{sectionHeader('CONNECTION HEALTH', 'Network', 'Measure local and public connection stability, then review Epic download and Windows adapter settings. A ping to a public host is not the same as game-server latency.')}{subnav('network')}{activeSubtab.network === 'Routing & Ping' ? <div className="space-y-4"><Card><div className="flex flex-wrap items-center justify-between gap-5"><div><h3 className="font-semibold">Connection sample</h3><p className="mt-2 text-sm leading-6 text-[#777]">Tests your gateway and a public ICMP host. Fortnite matchmaking regions vary; no route is guaranteed or forced.</p></div><button onClick={testConnection} disabled={Boolean(busy)} className="rounded-xl bg-white px-5 py-3 text-sm font-bold text-black disabled:opacity-50">{busy==='ping'?'TESTING…':'TEST CONNECTION'}</button></div>{networkCheck&&<div className="mt-5 grid gap-3 md:grid-cols-2">{[['Local gateway',networkCheck.gateway],['Public test host',networkCheck.internet]].map(([name,item])=><div key={name} className="rounded-xl bg-black/40 p-4"><p className="text-xs uppercase tracking-wide text-[#777]">{name}</p><p className="mt-2 text-xl font-semibold">{item?.averageMs==null?'No reply':`${item.averageMs} ms average`}</p><p className="mt-1 text-sm text-[#777]">{item?.lossPercent??'—'}% packet loss · {item?.sent??0} probes</p></div>)}</div>}</Card><Card><h3 className="font-semibold">Choose a region before playing</h3><p className="mt-2 text-sm leading-6 text-[#777]">Use each game’s own server or matchmaking region selector where available. Fortnite’s region list may not include Africa; Booster won’t show a region as available if the game does not offer it.</p><div className="mt-4 flex flex-wrap gap-2">{['Europe','North America','Asia','Brazil / South America','Middle East','Africa (only if offered in game)'].map((x)=><span key={x} className="rounded-lg border border-white/5 bg-black/30 px-3 py-2 text-xs text-[#aaa]">{x}</span>)}</div></Card></div> : null}{activeSubtab.network === 'Packet Loss' ? <div className="space-y-4"><Card><h3 className="font-semibold">Packet loss and jitter</h3><p className="mt-2 text-sm leading-6 text-[#777]">Run repeated samples and compare wired gateway results with public-host results. The current diagnostic uses ICMP and cannot prove the path used by Fortnite’s gameplay packets.</p><button onClick={testConnection} disabled={Boolean(busy)} className="mt-4 rounded-xl bg-white px-5 py-3 text-sm font-bold text-black">{busy==='ping'?'TESTING…':'RUN PACKET-LOSS SAMPLE'}</button>{networkCheck&&<p className="mt-4 text-sm text-white">Public sample: {networkCheck.internet?.lossPercent ?? '—'}% loss · {networkCheck.internet?.averageMs ?? '—'} ms average. {networkCheck.internet?.jitterMs ?? '—'} ms variation.</p>}</Card><Card><h3 className="font-semibold">If loss appears on the gateway</h3><p className="mt-2 text-sm leading-6 text-[#777]">Check the Ethernet cable, router port, and other devices on the local network. If gateway is clean but internet loss remains, compare another time and contact the ISP with the measurements.</p></Card></div> : null}{activeSubtab.network === 'Epic Downloads' ? <div className="space-y-4"><Card><div className="flex items-start gap-4"><Icon name="disk"/><div><h3 className="font-semibold">Epic Games downloads and verification</h3><p className="mt-2 text-sm leading-6 text-[#777]">Check Epic service status, make sure the Launcher download limit is off, and use Ethernet. Slow verification may be limited by drive reads, especially on an HDD.</p></div></div><ol className="mt-5 list-decimal space-y-2 pl-5 text-sm leading-6 text-[#999]"><li>In Epic Launcher Settings, check that Download Speed Limit is disabled.</li><li>Exit Epic before clearing its webcache, then relaunch it.</li><li>In Library, open Fortnite’s menu → Manage → Verify. It checks local data and can take time.</li><li>Check free space and drive activity on the install drive before retrying.</li></ol><div className="mt-5 flex flex-wrap gap-3"><button onClick={()=>run('sound','Opening Epic Games Launcher.',()=>call('openEpicLauncher'),'Epic Games Launcher opened.')} className="rounded-lg border border-white/10 px-4 py-3 text-xs font-bold">OPEN EPIC LAUNCHER</button><button onClick={()=>run('dns','Flushing the Windows DNS cache.',()=>call('runNetworkOptimization',{options:['flushDns']}),'DNS cache flushed.')} className="rounded-lg border border-white/10 px-4 py-3 text-xs font-bold">FLUSH DNS CACHE</button></div></Card><Card><p className="text-sm leading-6 text-amber-100/80">Changing DNS can help name resolution in some cases; it does not increase the speed of an active download if the ISP, disk, launcher limit, or Epic service is the bottleneck.</p></Card></div> : null}{activeSubtab.network === 'Windows Tweaks' ? <div className="space-y-4">{NETWORK_OPTIONS.map((option)=><Card key={option.id} className="flex flex-wrap items-center gap-5"><div className="min-w-0 flex-1"><h3 className="font-semibold">{option.title}<code className="ml-3 text-xs font-normal text-[#777]">{option.value}</code></h3><p className="mt-2 text-sm leading-6 text-[#777]">{option.description}</p></div><Toggle checked={network[option.id]} onChange={()=>setNetwork((v)=>({...v,[option.id]:!v[option.id]}))} label={option.title}/></Card>)}<div className="flex justify-end"><button onClick={applyNetwork} disabled={Boolean(busy)||!Object.values(network).some(Boolean)} className="rounded-xl bg-white px-5 py-3 text-sm font-bold text-black disabled:opacity-40">{busy==='network'?'APPLYING…':'APPLY SELECTED NETWORK CHANGES'}</button></div></div> : null}</div>;
+
+  const servicesView = () => <div>{sectionHeader('WINDOWS BACKGROUND SERVICES', 'Services & Debloat', 'Review service state before making Windows changes. This screen reports status; it does not silently stop update, biometric, or diagnostic services.')}{subnav('services')}{activeSubtab.services === 'Telemetry & Diagnostics' ? <div className="space-y-4"><Card><div className="flex flex-wrap items-center justify-between gap-4"><div><h3 className="font-semibold">Service status review</h3><p className="mt-2 text-sm text-[#777]">Read-only scan of the requested service list.</p></div><button onClick={scanServices} disabled={Boolean(busy)} className="rounded-lg border border-white/10 px-4 py-3 text-xs font-bold">{busy==='services'?'SCANNING…':'SCAN SERVICE STATUS'}</button></div></Card>{SERVICES.map(([name,title,description])=>{const found=serviceStatus?.find((service)=>service.name===name);return <Card key={name}><div className="flex flex-wrap items-start justify-between gap-4"><div><h3 className="font-semibold">{name}<span className="ml-3 text-sm font-normal text-[#aaa]">{title}</span></h3><p className="mt-2 text-sm text-[#777]">{description}</p></div><Pill tone={found?.status==='Running'?'green':'neutral'}>{found?.status||'NOT SCANNED'}</Pill></div></Card>})}</div> : <div className="space-y-4"><Card><h3 className="font-semibold">Optional Windows components</h3><p className="mt-2 text-sm leading-6 text-[#777]">Review Widgets, OneDrive startup, Xbox overlays, and preinstalled apps here. Booster won’t remove components or disable cloud sync without a dedicated reversible action.</p></Card>{[['Widgets','Disable from Windows Settings → Personalization → Taskbar if you do not use it.'],['OneDrive','Unlink or disable startup from OneDrive settings only if you do not rely on sync.'],['Xbox Game Bar','Turn off captures in Windows Settings if you do not record clips.'],['Windows Update','Keep updates available; do not disable the update service for gaming.']].map(([title,body])=><Card key={title}><h3 className="font-semibold">{title}</h3><p className="mt-2 text-sm leading-6 text-[#777]">{body}</p></Card>)}</div>}</div>;
+
+  const gamesView = () => <div>{sectionHeader('FORTNITE & APP MEMORY', 'Games & Apps', 'Tune Fortnite with a backed-up profile, troubleshoot the missing sound cues, and review memory-heavy applications.')}{subnav('games')}{activeSubtab.games === 'Fortnite Settings' ? <div className="space-y-4"><Card className="flex flex-wrap items-center justify-between gap-4"><div><h3 className="font-semibold">Fortnite settings profile</h3><p className="mt-2 text-sm text-[#777]">A .bak copy is created before settings are written. Unsupported settings may be ignored by the game.</p></div><button onClick={applyProfile} disabled={Boolean(busy)} className="rounded-lg bg-white px-5 py-3 text-xs font-bold text-black">{busy==='profile'?'SAVING…':'APPLY PROFILE'}</button></Card>{PROFILE_OPTIONS.map((item)=><Card key={item.id} className="flex flex-wrap items-center gap-5"><div className="min-w-0 flex-1"><h3 className="font-semibold">{item.title}<code className="ml-3 text-xs font-normal text-[#777]">{item.setting}</code></h3><p className="mt-2 text-sm leading-6 text-[#777]">{item.description}</p></div><Toggle checked={profile[item.id]} onChange={()=>setProfile((v)=>({...v,[item.id]:!v[item.id]}))} label={item.title}/></Card>)}<Card><p className="text-sm leading-6 text-amber-100/80">Do not delete random Fortnite animation, sound, or .pak files. The launcher can repair changed files, and unsupported edits can break audio or cause verification to redownload them.</p></Card></div> : null}{activeSubtab.games === 'Audio & Repair' ? <div className="space-y-4"><Card><div className="flex items-start gap-4"><span className="rounded-xl bg-white/[0.06] p-3"><Icon name="sound"/></span><div className="min-w-0 flex-1"><h3 className="font-semibold">Missing gunshots or footsteps</h3><p className="mt-2 text-sm leading-6 text-[#777]">First make sure Fortnite is using the actual headphones or speakers, not a stale “Default output” duplicate. If only some sounds are missing, verify Fortnite and check for a game-side issue.</p></div></div><div className="mt-5 flex flex-wrap gap-3"><button onClick={()=>run('audio','Opening Windows Sound settings.',()=>call('openSoundSettings'),'Windows Sound settings opened.')} className="rounded-lg border border-white/10 px-4 py-3 text-xs font-bold">OPEN SOUND SETTINGS</button><button onClick={()=>run('epic','Opening Epic Games Launcher.',()=>call('openEpicLauncher'),'Epic Games Launcher opened.')} className="rounded-lg bg-white px-4 py-3 text-xs font-bold text-black">OPEN EPIC FOR VERIFY</button></div></Card><Card><h3 className="font-semibold">In Fortnite Audio settings</h3><ul className="mt-3 list-disc space-y-2 pl-5 text-sm leading-6 text-[#888]"><li>Confirm the selected output device and that sound effects are audible in the mixer.</li><li>Try 3D Headphones and Visualize Sound Effects; visual cues can help indicate direction but do not restore missing audio.</li><li>For headphone audio that cuts out at game launch, check the Windows recording device’s exclusive-mode setting.</li></ul><p className="mt-4 text-xs leading-5 text-[#666]">Retrac is a separate community legacy client. Its older assets are not copied into the current Fortnite installation.</p></Card></div> : null}{activeSubtab.games === 'Memory' ? <div className="space-y-4"><Card><div className="flex flex-wrap items-center justify-between gap-4"><div><h3 className="font-semibold">System Memory Bloat Sweeper</h3><p className="mt-2 text-sm text-[#777]">Lists background processes using substantial memory. Booster does not close them automatically.</p></div><button onClick={scanMemory} disabled={Boolean(busy)} className="rounded-lg border border-white/10 px-4 py-3 text-xs font-bold">{busy==='memory'?'SCANNING…':'SCAN MEMORY'}</button></div></Card>{memoryProcesses.length>0&&<Card><label className="text-xs font-semibold uppercase tracking-wide text-[#777]">Choose process to watch<select value={selectedProcess} onChange={(event)=>setSelectedProcess(event.target.value)} className="mt-2 block w-full rounded-lg border border-white/10 bg-black px-3 py-3 text-sm text-white">{memoryProcesses.map((process)=><option key={process.Id} value={process.ProcessName}>{process.ProcessName} · {process.MemoryMB} MB</option>)}</select></label><div className="mt-5 flex flex-wrap items-center justify-between gap-4"><label className="flex flex-1 items-center gap-4 text-sm text-white">Soft target: {memoryTargetPercent}% of system RAM<input type="range" min="5" max="50" value={memoryTargetPercent} onChange={(event)=>setMemoryTargetPercent(Number(event.target.value))} className="min-w-40 flex-1 accent-white"/></label><span className="text-sm text-[#aaa]">≈ {metrics.memoryTotal ? (metrics.memoryTotal*memoryTargetPercent/100).toFixed(1) : '—'} GB</span></div><p className="mt-4 text-sm leading-6 text-amber-100/80">This is a monitoring target, not a hard cap. Forcing Chrome under a hard memory ceiling can make tabs crash or fail; Windows does not offer a safe seamless per-app RAM cap.</p></Card>}<Card><p className="text-sm leading-6 text-[#777]">A memory scan is a snapshot. Use it to identify apps you can close yourself before a game; do not terminate Windows services or unsaved work.</p></Card></div> : null}</div>;
+
+  const storageView = () => <div>{sectionHeader('C: SSD · D: HDD', 'Storage Cleanup', 'Find large files to review and older temporary files. Nothing is deleted automatically; individual and bulk actions show a Windows confirmation first.')}<div className="grid gap-4 md:grid-cols-2">{['C','D'].map((letter)=>{const drive=storageOverview?.drives?.find((item)=>item.letter===letter);return <Card key={letter}><div className="flex items-center justify-between"><div><p className="text-xs font-bold uppercase tracking-wide text-[#777]">{letter}: {letter==='C'?'SSD':'drive'}</p><p className="mt-2 text-xl font-semibold">{drive?.available?`${formatBytes(drive.freeBytes)} free`:'Checking drive…'}</p></div><button onClick={()=>scanDrive(letter)} disabled={Boolean(driveBusy)||Boolean(busy)||(drive&&!drive.available)} className="rounded-lg border border-white/10 px-4 py-3 text-xs font-bold disabled:opacity-40">{driveBusy===letter?'SCANNING…':`SCAN ${letter}:`}</button></div>{drive?.available&&<><div className="mt-5 h-2 rounded-full bg-[#222]"><div className="h-2 rounded-full bg-white" style={{width:`${Math.max(0,Math.min(100,drive.usedBytes/drive.totalBytes*100))}%`}}/></div><p className="mt-2 text-xs text-[#666]">{formatBytes(drive.usedBytes)} used of {formatBytes(drive.totalBytes)}</p></>}</Card>})}</div><Card className="mt-4"><div className="flex flex-wrap items-center justify-between gap-3"><div><h3 className="font-semibold">Scan results</h3><p className="mt-1 text-sm text-[#777]">{cleanupScan?`${cleanupScan.scannedFiles.toLocaleString()} scanned · ${cleanupScan.candidateCount} candidates · ${formatBytes(cleanupScan.candidateBytes)} total`:'Scan a drive to review files.'}</p></div>{cleanupScan&&<button onClick={selectSafeTemps} className="rounded-lg border border-white/10 px-4 py-2.5 text-xs font-bold">SELECT ALL SAFE TEMP FILES</button>}</div>{cleanupScan?.truncated&&<p className="mt-3 rounded-lg bg-amber-200/[0.05] p-3 text-xs text-amber-100">Scan limit reached. Results may be partial.</p>}<div className="mt-4 max-h-[460px] space-y-2 overflow-y-auto">{cleanupScan?.items?.length?cleanupScan.items.map((item)=><div key={item.id} className="flex items-start gap-3 rounded-xl border border-white/5 bg-black/30 p-4"><input type="checkbox" checked={Boolean(cleanupSelection[item.id])} onChange={(event)=>setCleanupSelection((v)=>({...v,[item.id]:event.target.checked}))} className="mt-1 accent-emerald-300"/><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><strong className="break-all text-sm">{item.name}</strong><Pill tone={item.safeToDelete?'green':'amber'}>{item.category==='temporary'?'OLD TEMP':'REVIEW'}</Pill><span className="text-xs text-[#aaa]">{formatBytes(item.bytes)}</span></div><p className="mt-1 break-all font-mono text-[11px] text-[#777]">{item.path}</p><p className="mt-1 text-xs text-[#666]">{item.source} · modified {new Date(item.modifiedUtc).toLocaleDateString()} · {item.note}</p></div></div>):cleanupScan?<p className="rounded-lg bg-black/30 p-4 text-sm text-[#777]">No candidates in the scanned locations.</p>:null}</div>{cleanupScan&&<div className="mt-4 flex flex-wrap items-center justify-between gap-3"><p className="text-sm text-[#777]">{selectedCount} selected · {formatBytes(selectedBytes)}</p><button onClick={removeSelected} disabled={!selectedCount||Boolean(busy)} className="rounded-xl bg-white px-5 py-3 text-xs font-bold text-black disabled:opacity-40">{busy==='delete'?'WAITING…':'MOVE SELECTED TO RECYCLE BIN'}</button></div>}</Card><Card className="mt-4"><p className="text-sm leading-6 text-[#777]">Large personal files are review-only. Older Temp files can be selected together, but the app still asks before moving them. Files go to Recycle Bin; empty it yourself after review to reclaim the space.</p></Card></div>;
+
+  const settingsView = () => <div>{sectionHeader('APP PREFERENCES', 'Settings', 'Booster opens at a compact desktop size and can be resized or maximized.')}<Card><h3 className="font-semibold">System profile</h3><div className="mt-4 grid gap-3 sm:grid-cols-2">{[['CPU','Intel Core i5-8400 · 6 cores'],['GPU','NVIDIA GTX 1060 · 6 GB'],['Memory','16 GB installed'],['Display','1080p · 144 Hz target']].map(([k,v])=><div key={k} className="rounded-xl bg-black/30 p-4"><p className="text-xs uppercase tracking-wide text-[#777]">{k}</p><p className="mt-2 text-sm font-semibold">{v}</p></div>)}</div><p className="mt-4 text-xs text-[#666]">Hardware labels are your provided profile; live readings are shown only when Windows telemetry returns them.</p></Card><Card className="mt-4"><h3 className="font-semibold">About actions and backups</h3><p className="mt-2 text-sm leading-6 text-[#777]">Fortnite profile and Windows registry changes save backups where supported. Review logs to see actions and errors. Booster avoids automatic deletion of game files and does not install controller drivers.</p></Card></div>;
+
+  const logsView = () => <div>{sectionHeader('APP ACTIVITY', 'Activity Logs', 'Readable action history from the main process. Clear the visible session log at any time.')}<Card><div className="mb-4 flex items-center justify-between"><p className="text-sm text-[#777]">{logs.length} entries</p><button onClick={()=>setLogs([])} className="rounded-lg border border-white/10 px-4 py-2 text-xs font-bold">CLEAR LOG</button></div><div className="max-h-[60vh] space-y-3 overflow-y-auto rounded-xl border border-white/5 bg-black p-4 font-mono text-xs">{logs.length?logs.map((entry)=><div key={entry.id} className="grid grid-cols-[70px_60px_1fr] gap-3"><time className="text-[#555]">{timeText(entry.time)}</time><span className={`font-bold ${logColor(entry.level)}`}>{entry.level}</span><span className="break-words text-[#aaa]">{entry.message}</span></div>):<p className="text-[#666]">No activity recorded.</p>}</div></Card></div>;
+
+  const renderContent = () => {
+    if (activeTab==='home') return dashboard();
+    if (activeTab==='latency') return latencyView();
+    if (activeTab==='network') return networkView();
+    if (activeTab==='services') return servicesView();
+    if (activeTab==='games') return gamesView();
+    if (activeTab==='storage') return storageView();
+    if (activeTab==='logs') return logsView();
+    return settingsView();
   };
 
-  const toggleProfile = (id) => setProfile((current) => ({ ...current, [id]: !current[id] }));
-  const toggleNetwork = (id) => setNetwork((current) => ({ ...current, [id]: !current[id] }));
-  const toggleWindowsTweak = (id) => {
-    setWindowsTweaks((current) => ({ ...current, [id]: !current[id] }));
-    setWindowsTouched((current) => ({ ...current, [id]: true }));
-  };
-
-  const renderHome = () => (
-    <div className="space-y-8">
-      <section className="relative overflow-hidden rounded-[28px] border border-white/5 bg-[#0d0d0d] p-9 lg:p-11">
-        <div className="pointer-events-none absolute -right-12 -top-28 h-80 w-80 rounded-full bg-white/[0.035] blur-3xl" />
-        <div className="relative flex flex-col justify-between gap-8 xl:flex-row xl:items-end">
-          <div className="max-w-2xl">
-            <StatusPill tone="green">SYSTEM READY</StatusPill>
-            <h2 className="mt-7 text-[42px] font-semibold leading-[1.06] tracking-[-0.055em] text-white lg:text-[54px]">Every frame,<br />with less friction.</h2>
-            <p className="mt-5 max-w-xl text-lg leading-8 text-[#8a8a8a]">Run the Booster maintenance sequence, tune your Fortnite profile, and review system activity in one place.</p>
-          </div>
-          <button type="button" onClick={runOptimizer} disabled={optimizing} className="group inline-flex min-h-[76px] min-w-[300px] items-center justify-between gap-5 rounded-2xl bg-white px-7 text-left text-black transition-all duration-200 hover:bg-[#dedede] disabled:cursor-wait disabled:opacity-60">
-            <span><span className="block text-xs font-bold tracking-[0.18em] text-black/55">{optimizing ? 'WORKING' : 'ONE CLICK'}</span><span className="mt-1 block text-xl font-bold tracking-[-0.02em]">{optimizing ? 'OPTIMIZING…' : 'AUTO-OPTIMIZE SYSTEM'}</span></span>
-            <span className="grid h-11 w-11 place-items-center rounded-xl bg-black text-white transition-transform duration-200 group-hover:scale-105"><Icon name={optimizing ? 'refresh' : 'bolt'} size={21} /></span>
-          </button>
-        </div>
-        <div className="relative mt-9 flex flex-wrap gap-3 border-t border-white/5 pt-6">
-          <StatusPill>Windows 11</StatusPill><StatusPill>144 Hz display</StatusPill><StatusPill>Fortnite profile ready</StatusPill>
-        </div>
-      </section>
-
-      <section>
-        <div className="mb-4 flex items-center justify-between"><h3 className="text-xl font-semibold tracking-tight text-white">System snapshot</h3><span className="text-sm text-[#737373]">Live values appear when telemetry is connected</span></div>
-        <div className="grid gap-4 md:grid-cols-3">
-          <MetricCard label="Processor" value={metrics.cpu} suffix="%" icon="cpu" detail="Intel Core i5-8400 · 6 cores" percent={metrics.cpu} />
-          <MetricCard label="Graphics" value={metrics.gpu} suffix="%" icon="signal" detail="NVIDIA GeForce GTX 1060 · 6 GB" percent={metrics.gpu} />
-          <MetricCard label="Memory" value={metrics.memoryUsed} suffix={metrics.memoryUsed == null ? '' : ` / ${metrics.memoryTotal} GB`} icon="memory" detail="16 GB installed" percent={memoryPercent} />
-        </div>
-      </section>
-
-      <section className="rounded-2xl border border-white/5 bg-[#0d0d0d] p-7">
-        <div className="flex items-center justify-between"><div><h3 className="text-xl font-semibold text-white">Quick actions</h3><p className="mt-1 text-sm text-[#777]">Jump straight to the controls you use most.</p></div><Icon name="arrow" className="text-[#666]" /></div>
-        <div className="mt-6 grid gap-3 md:grid-cols-2">
-          <button type="button" onClick={() => setActiveTab('fortnite')} className="flex items-center gap-4 rounded-xl border border-white/5 bg-[#121212] p-5 text-left transition-colors hover:border-white/10 hover:bg-[#171717]"><span className="rounded-xl bg-white/[0.06] p-3 text-white"><Icon name="gamepad" /></span><span><span className="block font-semibold text-white">Fortnite profile</span><span className="mt-1 block text-sm text-[#777]">Apply your selected game settings</span></span></button>
-          <button type="button" onClick={() => setActiveTab('connection')} className="flex items-center gap-4 rounded-xl border border-white/5 bg-[#121212] p-5 text-left transition-colors hover:border-white/10 hover:bg-[#171717]"><span className="rounded-xl bg-white/[0.06] p-3 text-white"><Icon name="globe" /></span><span><span className="block font-semibold text-white">Connection suite</span><span className="mt-1 block text-sm text-[#777]">Review Windows network settings</span></span></button>
-        </div>
-      </section>
-    </div>
-  );
-
-  const renderFortnite = () => (
-    <div className="space-y-7">
-      <section className="flex flex-col justify-between gap-5 rounded-[26px] border border-white/5 bg-[#0d0d0d] p-8 lg:flex-row lg:items-end lg:p-9">
-        <div><StatusPill>GAME PROFILE</StatusPill><h2 className="mt-5 text-4xl font-semibold tracking-[-0.045em] text-white">Fortnite settings</h2><p className="mt-3 max-w-2xl text-base leading-7 text-[#858585]">Choose the profile values to write to GameUserSettings.ini. A backup should be created by the main process before changes are saved.</p></div>
-        <button type="button" onClick={applyProfile} disabled={applyingProfile} className="inline-flex h-14 items-center justify-center gap-3 rounded-xl bg-white px-6 text-base font-bold text-black transition-colors hover:bg-[#ddd] disabled:opacity-50">{applyingProfile ? 'APPLYING…' : 'APPLY PROFILE'}<Icon name="arrow" size={18} /></button>
-      </section>
-
-      <section className="space-y-3">
-        {PROFILE_OPTIONS.map((option, index) => (
-          <article key={option.id} className="flex items-center gap-5 rounded-2xl border border-white/5 bg-[#0d0d0d] p-6 transition-colors duration-200 hover:border-white/10">
-            <div className="grid h-12 w-12 shrink-0 place-items-center rounded-xl border border-white/5 bg-[#151515] text-sm font-semibold text-[#777]">0{index + 1}</div>
-            <div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-3"><h3 className="text-lg font-semibold text-white">{option.title}</h3><code className="rounded-md border border-white/5 bg-black/40 px-2.5 py-1 text-xs text-[#999]">{option.setting}</code></div><p className="mt-2 text-sm leading-6 text-[#777]">{option.description}</p></div>
-            <Toggle checked={profile[option.id]} onChange={() => toggleProfile(option.id)} label={option.title} />
-          </article>
-        ))}
-      </section>
-
-      <article className="flex items-center gap-5 rounded-2xl border border-white/5 bg-[#0d0d0d] p-6 opacity-80">
-        <div className="grid h-12 w-12 shrink-0 place-items-center rounded-xl border border-white/5 bg-[#151515] text-sm font-semibold text-[#777]">06</div>
-        <div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-3"><h3 className="text-lg font-semibold text-white">Menu Asset Stream Limiting</h3><StatusPill tone="amber">NOT MAPPED</StatusPill></div><p className="mt-2 text-sm leading-6 text-[#777]">No verified GameUserSettings key is configured for this option, so it cannot be applied. Fortnite may overwrite or ignore undocumented values.</p></div>
-        <Toggle checked={false} onChange={() => {}} label="Menu Asset Stream Limiting unavailable" disabled />
-      </article>
-
-      <div className="flex items-start gap-3 rounded-xl border border-amber-300/10 bg-amber-200/[0.035] p-5 text-sm leading-6 text-[#aaa]"><Icon name="warning" className="mt-0.5 shrink-0 text-amber-200" size={18} /><p>Fortnite updates can rename, ignore, or overwrite configuration keys. Booster backs up the settings file before applying supported profile values and restores its Read-Only attribute afterward.</p></div>
-    </div>
-  );
-
-  const renderConnection = () => (
-    <div className="space-y-7">
-      <section className="overflow-hidden rounded-[26px] border border-white/5 bg-[#0d0d0d] p-8 lg:p-9">
-        <div className="flex flex-wrap items-start justify-between gap-6"><div><StatusPill tone="amber">WINDOWS NETWORK SETTINGS</StatusPill><h2 className="mt-5 text-4xl font-semibold tracking-[-0.045em] text-white">Connection suite</h2><p className="mt-3 max-w-2xl text-base leading-7 text-[#858585]">Review system-wide TCP, DNS, and network adapter settings before applying them.</p></div><div className="rounded-2xl border border-white/5 bg-black/30 px-5 py-4 text-right"><p className="text-xs font-bold uppercase tracking-[0.16em] text-[#777]">Target route</p><p className="mt-2 text-2xl font-semibold text-white">Frankfurt <span className="text-base font-medium text-[#777]">· Germany</span></p><p className="mt-1 text-sm text-[#888]">145 ms target estimate</p></div></div>
-        <div className="mt-6 flex items-start gap-3 rounded-xl border border-amber-300/10 bg-amber-200/[0.035] p-4 text-sm leading-6 text-[#aaa]"><Icon name="warning" className="mt-0.5 shrink-0 text-amber-200" size={18} /><p>Windows DNS and TCP settings cannot lock a physical route or guarantee latency or packet loss. Actual results depend on your ISP, game server, and network path. DNS changes can affect every app on the selected adapter.</p></div>
-      </section>
-
-      <section className="space-y-3">
-        {NETWORK_OPTIONS.map((option) => (
-          <article key={option.id} className="flex items-center gap-5 rounded-2xl border border-white/5 bg-[#0d0d0d] p-5 transition-colors duration-200 hover:border-white/10">
-            <div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-3"><h3 className="text-base font-semibold text-white">{option.title}</h3><code className="rounded-md border border-white/5 bg-black/40 px-2 py-1 text-[11px] text-[#999]">{option.value}</code></div><p className="mt-2 text-sm leading-6 text-[#777]">{option.description}</p></div>
-            <Toggle checked={network[option.id]} onChange={() => toggleNetwork(option.id)} label={option.title} />
-          </article>
-        ))}
-      </section>
-
-      <div className="flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-white/5 bg-[#0d0d0d] p-6"><div><p className="font-semibold text-white">Apply selected changes</p><p className="mt-1 text-sm text-[#777]">The main process should request Windows permission and report each result.</p></div><button type="button" onClick={runNetworkOptimization} disabled={applyingNetwork || !Object.values(network).some(Boolean)} className="inline-flex h-14 items-center gap-3 rounded-xl bg-white px-6 font-bold text-black transition-colors hover:bg-[#ddd] disabled:cursor-not-allowed disabled:opacity-40">{applyingNetwork ? 'APPLYING…' : 'APPLY NETWORK TWEAKS'}<Icon name="arrow" size={18} /></button></div>
-    </div>
-  );
-
-  const renderSettings = () => (
-    <div className="space-y-7">
-      <section className="rounded-[26px] border border-white/5 bg-[#0d0d0d] p-8"><StatusPill>GENERAL WINDOWS SYSTEM</StatusPill><h2 className="mt-5 text-4xl font-semibold tracking-[-0.045em] text-white">Windows settings</h2><p className="mt-3 text-base leading-7 text-[#858585]">Review system controls for the i5-8400, GTX 1060, and 16 GB memory profile.</p></section>
-      <section className="grid gap-4 md:grid-cols-2">
-        {[
-          ['Processor', 'Intel Core i5-8400', '6 cores · 2.80 GHz'],
-          ['Graphics', 'NVIDIA GeForce GTX 1060', '6 GB dedicated VRAM'],
-          ['Memory', '16 GB RAM', 'Windows reports 16,214 MB available'],
-          ['Display', '1920 × 1080', '144 Hz active mode']
-        ].map(([label, value, detail]) => <div key={label} className="rounded-2xl border border-white/5 bg-[#0d0d0d] p-6"><p className="text-xs font-bold uppercase tracking-[0.16em] text-[#777]">{label}</p><p className="mt-4 text-xl font-semibold text-white">{value}</p><p className="mt-2 text-sm text-[#777]">{detail}</p></div>)}
-      </section>
-      <section className="rounded-2xl border border-white/5 bg-[#0d0d0d] p-6">
-        <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-start">
-          <div className="max-w-2xl"><h3 className="text-xl font-semibold text-white">Storage Cleanup</h3><p className="mt-2 text-sm leading-6 text-[#858585]">Check C: and D: for older temporary files and large files you may want to review. C: checks your user Temp, Downloads, Desktop, Documents, and Videos. D: checks files at its root and ordinary top-level folders while skipping known Windows, app, and game folders.</p></div>
-          <div className="flex shrink-0 gap-2">
-            {['C', 'D'].map((letter) => {
-              const drive = storageOverview?.drives?.find((item) => item.letter === letter);
-              return <button key={letter} type="button" onClick={() => scanStorageDrive(letter)} disabled={scanningDrive !== null || deletingCleanup || (drive && !drive.available)} className="rounded-xl border border-white/10 bg-[#171717] px-4 py-3 text-xs font-bold text-white transition-colors hover:bg-[#222] disabled:cursor-not-allowed disabled:opacity-40">{scanningDrive === letter ? 'SCANNING…' : `SCAN ${letter}:`}</button>;
-            })}
-          </div>
-        </div>
-        <div className="mt-5 grid gap-3 sm:grid-cols-2">
-          {['C', 'D'].map((letter) => {
-            const drive = storageOverview?.drives?.find((item) => item.letter === letter);
-            return <div key={letter} className="rounded-xl border border-white/5 bg-black/30 p-4">
-              <div className="flex items-center justify-between gap-3"><span className="font-semibold text-white">{letter}: drive {letter === 'C' ? '· SSD' : ''}</span><span className="text-xs text-[#777]">{drive?.available ? `${formatBytes(drive.freeBytes)} free` : drive ? 'Not available' : 'Checking…'}</span></div>
-              {drive?.available && <><div className="mt-3 h-2 overflow-hidden rounded-full bg-white/[0.07]"><div className="h-full rounded-full bg-emerald-300" style={{ width: `${drive.totalBytes ? Math.max(0, Math.min(100, (drive.usedBytes / drive.totalBytes) * 100)) : 0}%` }} /></div><p className="mt-2 text-xs text-[#666]">{formatBytes(drive.usedBytes)} used of {formatBytes(drive.totalBytes)}</p></>}
-            </div>;
-          })}
-        </div>
-        <div className="mt-4 flex items-start gap-3 rounded-xl border border-amber-300/10 bg-amber-200/[0.035] p-4 text-sm leading-6 text-[#aaa]"><Icon name="warning" className="mt-0.5 shrink-0 text-amber-200" size={18} /><p>Nothing is deleted automatically. Files are shown with their full path for review; checked files are moved to the Recycle Bin only after a Windows confirmation. Older Temp files are candidates, while large personal files are review-only. System, app, and game folders are excluded. To reclaim the space immediately, empty the Recycle Bin after reviewing it.</p></div>
-        {cleanupScan && <div className="mt-5">
-          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/5 pb-4"><div><h4 className="font-semibold text-white">{cleanupScan.drive}: scan results</h4><p className="mt-1 text-xs text-[#777]">{cleanupScan.scannedFiles.toLocaleString()} files checked · {cleanupScan.candidateCount} candidates · {formatBytes(cleanupScan.temporaryBytes)} old Temp · {formatBytes(cleanupScan.reviewBytes)} large files to review</p></div><span className="text-xs text-[#777]">Select only files you recognize</span></div>
-          {cleanupScan.truncated && <p className="mt-3 rounded-lg bg-amber-200/[0.05] p-3 text-xs leading-5 text-amber-100/80">The scan reached its safety limit and these results may be incomplete. Scan a narrower area or review the current results carefully.</p>}
-          <div className="mt-3 max-h-[380px] space-y-2 overflow-y-auto pr-1">
-            {cleanupScan.items.length ? cleanupScan.items.map((item) => <label key={item.id} className="flex cursor-pointer items-start gap-3 rounded-xl border border-white/5 bg-black/30 p-4 transition-colors hover:border-white/10">
-              <input type="checkbox" className="mt-1 h-4 w-4 shrink-0 accent-emerald-300" checked={Boolean(cleanupSelection[item.id])} onChange={(event) => setCleanupSelection((current) => ({ ...current, [item.id]: event.target.checked }))} />
-              <span className="min-w-0 flex-1"><span className="flex flex-wrap items-center gap-2"><span className="break-all font-medium text-white">{item.name}</span><span className={`rounded-full px-2 py-1 text-[10px] font-bold tracking-wide ${item.category === 'temporary' ? 'bg-emerald-300/10 text-emerald-200' : 'bg-amber-300/10 text-amber-100'}`}>{item.category === 'temporary' ? 'OLD TEMP' : 'REVIEW'}</span><span className="text-xs text-[#999]">{formatBytes(item.bytes)}</span></span><span className="mt-1 block break-all font-mono text-[11px] leading-5 text-[#777]">{item.path}</span><span className="mt-1 block text-[11px] text-[#666]">{item.source} · modified {new Date(item.modifiedUtc).toLocaleDateString()}</span></span>
-            </label>) : <p className="rounded-xl border border-white/5 bg-black/30 p-5 text-sm text-[#777]">No cleanup candidates were found in the checked folders.</p>}
-          </div>
-          {(() => {
-            const selectedBytes = cleanupScan.items.filter((item) => cleanupSelection[item.id]).reduce((sum, item) => sum + item.bytes, 0);
-            const selectedCount = cleanupScan.items.filter((item) => cleanupSelection[item.id]).length;
-            return <div className="mt-4 flex flex-wrap items-center justify-between gap-3"><p className="text-sm text-[#888]">{selectedCount} selected · {formatBytes(selectedBytes)}</p><button type="button" onClick={removeSelectedCleanup} disabled={!selectedCount || deletingCleanup} className="rounded-xl bg-white px-5 py-3 text-xs font-bold text-black transition-colors hover:bg-[#ddd] disabled:cursor-not-allowed disabled:opacity-40">{deletingCleanup ? 'MOVING FILES…' : 'MOVE SELECTED TO RECYCLE BIN'}</button></div>;
-          })()}
-        </div>}
-      </section>
-      <section className="space-y-4">
-        <article className="rounded-2xl border border-white/5 bg-[#0d0d0d] p-6">
-          <div className="flex items-start gap-4">
-            <div className="rounded-xl border border-white/5 bg-[#151515] p-3 text-white"><Icon name="cpu" size={22} /></div>
-            <div className="min-w-0 flex-1"><h3 className="text-lg font-semibold text-white">CPU Dynamic Core Performance</h3><p className="mt-2 text-sm leading-6 text-[#777]">Disable Windows core parking and set minimum processor performance to 100%. Previous power-plan values are backed up. This changes power policy; it does not overclock the CPU.</p><p className="mt-2 text-xs leading-5 text-amber-100/70">This keeps the CPU at a high minimum state and can increase power use and heat.</p></div>
-            <button type="button" onClick={runCpuOptimization} disabled={optimizingCpu} className="shrink-0 rounded-xl bg-white px-4 py-3 text-xs font-bold text-black transition-colors hover:bg-[#ddd] disabled:opacity-50">{optimizingCpu ? 'APPLYING…' : 'APPLY CPU PROFILE'}</button>
-          </div>
-        </article>
-
-        <article className="rounded-2xl border border-white/5 bg-[#0d0d0d] p-6">
-          <div className="flex items-start gap-4">
-            <div className="rounded-xl border border-white/5 bg-[#151515] p-3 text-white"><Icon name="memory" size={22} /></div>
-            <div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-3"><h3 className="text-lg font-semibold text-white">System Memory Bloat Sweeper</h3><StatusPill>{scanningMemory ? 'SCANNING' : `${memoryProcesses.length} FOUND`}</StatusPill></div><p className="mt-2 text-sm leading-6 text-[#777]">Scan for large background processes using at least 150 MB. Results are listed for review; apps and browser update services are left running.</p></div>
-            <button type="button" onClick={scanBackgroundMemory} disabled={scanningMemory} className="shrink-0 rounded-xl border border-white/10 bg-[#171717] px-4 py-3 text-xs font-bold text-white transition-colors hover:bg-[#222] disabled:opacity-50">{scanningMemory ? 'SCANNING…' : 'SCAN MEMORY'}</button>
-          </div>
-          <div className="mt-5 max-h-36 space-y-2 overflow-y-auto rounded-xl border border-white/5 bg-black/50 p-3 font-mono text-xs">
-            {memoryProcesses.length ? memoryProcesses.map((process, index) => <div key={`${process.Id ?? process.id ?? index}-${process.ProcessName ?? process.processName ?? 'process'}`} className="flex items-center justify-between gap-3 text-[#aaa]"><span className="truncate">{process.ProcessName || process.processName || 'Process'} <span className="text-[#666]">PID {process.Id ?? process.id ?? '—'}</span></span><span className="shrink-0 text-white">{process.MemoryMB ?? process.memoryMB ?? '—'} MB</span></div>) : <p className="text-[#666]">Run a scan to list background memory users.</p>}
-          </div>
-        </article>
-      </section>
-
-      <section className="space-y-3 rounded-2xl border border-white/5 bg-[#0d0d0d] p-6">
-        <div><h3 className="text-lg font-semibold text-white">Windows system tweaks</h3><p className="mt-1 text-sm leading-6 text-[#777]">Choose values, then apply. Previous registry values are saved to a backup file.</p></div>
-        <article className="flex items-center gap-4 rounded-xl border border-white/5 bg-black/30 p-4">
-          <div className="min-w-0 flex-1"><h4 className="text-base font-semibold text-white">Accelerate Win32 Priority Threads</h4><p className="mt-1 text-sm leading-5 text-[#777]">Set Win32PrioritySeparation to 0x26 (38 decimal) to adjust thread quantum behavior.</p></div>
-          <Toggle checked={windowsTweaks.win32PriorityThreads} onChange={() => toggleWindowsTweak('win32PriorityThreads')} label="Accelerate Win32 Priority Threads" />
-        </article>
-        <article className="flex items-center gap-4 rounded-xl border border-white/5 bg-black/30 p-4">
-          <div className="min-w-0 flex-1"><h4 className="text-base font-semibold text-white">Destroy Windows GameDVR Captures</h4><p className="mt-1 text-sm leading-5 text-[#777]">Disable GameDVR capture settings for the current account and Windows policy.</p></div>
-          <Toggle checked={windowsTweaks.disableGameDvr} onChange={() => toggleWindowsTweak('disableGameDvr')} label="Destroy Windows GameDVR Captures" />
-        </article>
-        <div className="flex items-center justify-between gap-4 pt-2"><p className="text-xs leading-5 text-[#666]">Windows may request administrator permission for machine-wide policy keys.</p><button type="button" onClick={applyWindowsSettings} disabled={applyingWindows || !Object.keys(windowsTouched).length} className="shrink-0 rounded-xl bg-white px-5 py-3 text-xs font-bold text-black transition-colors hover:bg-[#ddd] disabled:cursor-not-allowed disabled:opacity-40">{applyingWindows ? 'APPLYING…' : 'APPLY WINDOWS TWEAKS'}</button></div>
-      </section>
-
-      <section className="rounded-2xl border border-white/5 bg-[#0d0d0d] p-6"><div className="flex items-center gap-4"><div className="rounded-xl bg-white/[0.06] p-3 text-white"><Icon name="shield" /></div><div><h3 className="font-semibold text-white">Privacy and permissions</h3><p className="mt-1 text-sm leading-6 text-[#777]">System changes run through the Electron main process. The React UI does not access Node.js, PowerShell, or the filesystem directly.</p></div></div></section>
-    </div>
-  );
-
-  const renderActiveView = () => {
-    if (activeTab === 'fortnite') return renderFortnite();
-    if (activeTab === 'connection') return renderConnection();
-    if (activeTab === 'settings') return renderSettings();
-    return renderHome();
-  };
-
-  const logColor = (level) => ({ OK: 'text-emerald-300', INFO: 'text-[#a2a2a2]', ACTION: 'text-sky-300', WARN: 'text-amber-200', ERROR: 'text-rose-300', WAIT: 'text-[#777]' }[level] || 'text-[#a2a2a2]');
-  const formatLogTime = (date) => new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).format(date instanceof Date ? date : new Date(date));
-
-  return (
-    <div className="flex h-screen min-h-[720px] w-full overflow-hidden bg-black font-sans text-white selection:bg-white/20">
-      <aside className="flex w-[320px] shrink-0 flex-col border-r border-white/5 bg-black px-6 py-7">
-        <div className="flex items-center gap-4 px-2"><div className="grid h-12 w-12 place-items-center rounded-[15px] bg-white text-black"><Icon name="bolt" size={25} /></div><div><p className="text-xl font-bold tracking-[-0.04em]">BOOSTER</p><p className="mt-0.5 text-[11px] font-semibold uppercase tracking-[0.2em] text-[#666]">Performance console</p></div></div>
-
-        <div className="mt-12 px-3 text-[11px] font-bold uppercase tracking-[0.18em] text-[#5f5f5f]">Workspace</div>
-        <nav className="relative mt-4 space-y-2" aria-label="Main navigation">
-          <span className="pointer-events-none absolute left-0 top-0 h-[56px] w-full rounded-xl border border-white/5 bg-[#111] transition-transform duration-200 ease-out" style={{ transform: `translateY(${activeIndex * 64}px)` }} />
-          {NAV_ITEMS.map((item, index) => {
-            const active = activeTab === item.id;
-            return <button type="button" key={item.id} onClick={() => setActiveTab(item.id)} className={`relative z-10 flex h-[56px] w-full items-center gap-4 rounded-xl px-4 text-left transition-colors duration-200 ease-out ${active ? 'text-white' : 'text-[#777] hover:text-white'}`}>
-              <Icon name={item.icon} size={20} className={active ? 'text-white' : 'text-[#676767]'} /><span className="text-[15px] font-semibold">{item.label}</span>{active && <span className="ml-auto h-2 w-2 rounded-full bg-white" />}
-            </button>;
-          })}
-        </nav>
-
-        <div className="mt-auto space-y-5">
-          <div className="rounded-2xl border border-white/5 bg-[#0d0d0d] p-5"><div className="flex items-center justify-between"><span className="text-xs font-bold uppercase tracking-[0.16em] text-[#777]">Booster status</span><span className="h-2 w-2 rounded-full bg-emerald-400 shadow-[0_0_12px_rgba(52,211,153,0.55)]" /></div><p className="mt-3 text-sm font-semibold text-white">Ready for your next session</p><p className="mt-1 text-xs leading-5 text-[#6f6f6f]">Actions are logged in the monitoring panel.</p></div>
-          <button type="button" onClick={launchFortnite} className="group flex min-h-[76px] w-full items-center justify-between rounded-2xl bg-white px-5 text-black transition-all duration-200 hover:bg-[#dedede] active:scale-[0.99]"><span className="text-left"><span className="block text-[10px] font-bold tracking-[0.18em] text-black/55">READY WHEN YOU ARE</span><span className="mt-1 block text-lg font-extrabold tracking-[-0.02em]">LAUNCH FORTNITE</span></span><span className="grid h-11 w-11 place-items-center rounded-xl bg-black text-white transition-transform duration-200 group-hover:translate-x-1"><Icon name="arrow" size={19} /></span></button>
-        </div>
-      </aside>
-
-      <main className="min-w-0 flex-1 overflow-y-auto bg-black px-8 py-7 2xl:px-10">
-        <header className="mb-8 flex items-center justify-between border-b border-white/5 pb-6"><div><p className="text-sm font-medium text-[#6e6e6e]">Booster <span className="px-2 text-[#444]">/</span><span className="text-[#aaa]">{activeTitle}</span></p><h1 className="mt-3 text-[30px] font-semibold tracking-[-0.04em] text-white">{activeTitle === 'Overview' ? 'Your performance overview' : activeTitle}</h1></div><div className="flex items-center gap-3"><StatusPill tone={bridge ? 'green' : 'amber'}>{bridge ? 'MAIN PROCESS CONNECTED' : 'BRIDGE NOT CONNECTED'}</StatusPill><div className="grid h-11 w-11 place-items-center rounded-full border border-white/10 bg-[#111] text-sm font-bold text-white">B</div></div></header>
-        <style>{'@keyframes booster-enter{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:translateY(0)}}'}</style>
-        <div key={activeTab} style={{ animation: 'booster-enter 200ms ease-out both' }}>{renderActiveView()}</div>
-      </main>
-
-      <aside className="flex w-[380px] shrink-0 flex-col border-l border-white/5 bg-[#050505]">
-        <div className="flex items-center justify-between border-b border-white/5 px-7 py-7"><div><p className="text-xs font-bold uppercase tracking-[0.18em] text-[#666]">Monitoring</p><h2 className="mt-2 text-xl font-semibold tracking-tight text-white">Live system</h2></div><span className="relative flex h-3 w-3"><span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-30" /><span className="relative inline-flex h-3 w-3 rounded-full bg-emerald-400" /></span></div>
-
-        <div className="space-y-4 px-6 py-6">
-          <div className="rounded-2xl border border-white/5 bg-[#0d0d0d] p-5"><div className="flex items-center gap-3"><div className="rounded-lg bg-white/[0.06] p-2 text-[#ccc]"><Icon name="cpu" size={17} /></div><span className="text-sm font-semibold text-[#aaa]">CPU utilization</span></div><div className="mt-5 flex items-end justify-between"><span className="text-3xl font-semibold tracking-[-0.04em] text-white">{metrics.cpu == null ? '—' : `${metrics.cpu}%`}</span><span className="text-xs text-[#666]">i5-8400 · 6 cores</span></div><div className="mt-4 h-1.5 rounded-full bg-[#222]"><div className="h-full rounded-full bg-white transition-all duration-500" style={{ width: `${metrics.cpu == null ? 0 : Math.max(0, Math.min(100, metrics.cpu))}%` }} /></div></div>
-          <div className="rounded-2xl border border-white/5 bg-[#0d0d0d] p-5"><div className="flex items-center gap-3"><div className="rounded-lg bg-white/[0.06] p-2 text-[#ccc]"><Icon name="signal" size={17} /></div><span className="text-sm font-semibold text-[#aaa]">GPU utilization</span></div><div className="mt-5 flex items-end justify-between"><span className="text-3xl font-semibold tracking-[-0.04em] text-white">{metrics.gpu == null ? '—' : `${metrics.gpu}%`}</span><span className="text-xs text-[#666]">GTX 1060 · 6 GB</span></div><div className="mt-4 h-1.5 rounded-full bg-[#222]"><div className="h-full rounded-full bg-white transition-all duration-500" style={{ width: `${metrics.gpu == null ? 0 : Math.max(0, Math.min(100, metrics.gpu))}%` }} /></div></div>
-          <div className="rounded-2xl border border-white/5 bg-[#0d0d0d] p-5"><div className="flex items-center gap-3"><div className="rounded-lg bg-white/[0.06] p-2 text-[#ccc]"><Icon name="memory" size={17} /></div><span className="text-sm font-semibold text-[#aaa]">System memory</span></div><div className="mt-5 flex items-end justify-between"><span className="text-3xl font-semibold tracking-[-0.04em] text-white">{metrics.memoryUsed == null ? '—' : `${metrics.memoryUsed} GB`}</span><span className="text-xs text-[#666]">of {metrics.memoryTotal} GB</span></div><div className="mt-4 h-1.5 rounded-full bg-[#222]"><div className="h-full rounded-full bg-white transition-all duration-500" style={{ width: `${memoryPercent == null ? 0 : Math.max(0, Math.min(100, memoryPercent))}%` }} /></div></div>
-          <div className="rounded-2xl border border-white/5 bg-[#0d0d0d] p-5"><div className="flex items-center gap-3"><div className="rounded-lg bg-white/[0.06] p-2 text-[#ccc]"><Icon name="globe" size={17} /></div><span className="text-sm font-semibold text-[#aaa]">Network route</span></div><div className="mt-4 flex items-center justify-between"><span className="text-lg font-semibold text-white">{metrics.latency == null ? '— ms' : `${metrics.latency} ms`}</span><span className="text-xs text-[#666]">{metrics.adapter}</span></div><p className="mt-2 text-xs text-[#666]">Frankfurt target: 145 ms estimate</p><div className="mt-3 flex items-center justify-between border-t border-white/5 pt-3"><span className="text-xs text-[#777]">Packet loss</span><span className="font-mono text-sm text-emerald-300">{metrics.packetLoss == null ? '—' : `${metrics.packetLoss}%`}</span></div><p className="mt-1 text-[10px] text-[#555]">Live packet-loss measurement unavailable</p></div>
-        </div>
-
-        <div className="flex min-h-0 flex-1 flex-col border-t border-white/5 px-6 py-6"><div className="mb-4 flex items-center justify-between"><div><p className="text-xs font-bold uppercase tracking-[0.16em] text-[#666]">Activity stream</p><h3 className="mt-1 text-base font-semibold text-white">Diagnostic console</h3></div><button type="button" onClick={() => setLogs([])} className="rounded-lg border border-white/5 px-3 py-2 text-xs font-semibold text-[#777] transition-colors hover:bg-white/5 hover:text-white">CLEAR</button></div>
-          <div className="min-h-[190px] flex-1 space-y-3 overflow-y-auto rounded-xl border border-white/5 bg-black p-4 font-mono text-[12px] leading-5">
-            {logs.map((entry) => <div key={entry.id} className="grid grid-cols-[60px_45px_1fr] gap-2"><span className="text-[#555]">{formatLogTime(entry.time)}</span><span className={`font-bold ${logColor(entry.level)}`}>{entry.level}</span><span className="break-words text-emerald-200/80">{entry.message}</span></div>)}
-            {logs.length === 0 && <p className="text-[#555]">No diagnostic activity.</p>}
-            <div id="booster-console-end" />
-          </div>
-          <div className="mt-4 flex items-center justify-between text-[11px] font-semibold uppercase tracking-[0.13em] text-[#555]"><span className="inline-flex items-center gap-2"><span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />Console active</span><span>{logs.length} entries</span></div>
-        </div>
-      </aside>
-
-      {toast && <div role="status" className={`fixed bottom-6 left-1/2 z-50 -translate-x-1/2 rounded-xl border px-5 py-4 text-sm font-semibold shadow-2xl backdrop-blur ${toast.tone === 'green' ? 'border-emerald-300/20 bg-[#0d1712] text-emerald-100' : toast.tone === 'amber' ? 'border-amber-300/20 bg-[#19150c] text-amber-100' : 'border-white/10 bg-[#111] text-white'}`}>{toast.message}</div>}
-    </div>
-  );
+  return <div className="flex h-screen min-h-[620px] w-full overflow-hidden bg-black font-sans text-white selection:bg-white/20">
+    <aside className="flex w-[250px] shrink-0 flex-col border-r border-white/5 bg-black px-4 py-5 xl:w-[280px] xl:px-5"><div className="flex items-center gap-3 px-2"><div className="grid h-11 w-11 place-items-center rounded-[14px] bg-white text-black"><Icon name="bolt" size={24}/></div><div><p className="text-lg font-extrabold tracking-[-0.04em]">BOOSTER</p><p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-[#666]">Performance console</p></div></div><p className="mt-9 px-3 text-[10px] font-bold uppercase tracking-[0.18em] text-[#555]">Workspace</p><nav className="relative mt-3 space-y-1.5" aria-label="Main navigation"><span className="pointer-events-none absolute left-0 top-0 h-[48px] w-full rounded-xl border border-white/5 bg-[#111] transition-transform duration-200 ease-out" style={{transform:`translateY(${NAV_ITEMS.findIndex((item)=>item.id===activeTab)*54}px)`}}/>{NAV_ITEMS.map((item)=>{const isActive=activeTab===item.id;return <button key={item.id} onClick={()=>setActiveTab(item.id)} className={`relative z-10 flex h-12 w-full items-center gap-3 rounded-xl px-3 text-left transition-colors duration-200 ${isActive?'text-white':'text-[#777] hover:text-white'}`}><Icon name={item.icon} size={18}/><span className="text-sm font-semibold">{item.label}</span>{isActive&&<span className="ml-auto h-1.5 w-1.5 rounded-full bg-white"/>}</button>})}</nav><div className="mt-auto space-y-3"><div className="rounded-xl border border-white/5 bg-[#0d0d0d] p-4"><div className="flex items-center justify-between"><span className="text-[10px] font-bold uppercase tracking-[0.16em] text-[#777]">Status</span><span className="h-2 w-2 rounded-full bg-emerald-400"/></div><p className="mt-2 text-sm font-semibold">Ready for your session</p><p className="mt-1 text-xs leading-5 text-[#666]">Updates and errors appear in Activity Logs.</p></div><button onClick={launchFortnite} disabled={Boolean(busy)} className="group flex min-h-[66px] w-full items-center justify-between rounded-xl bg-white px-4 text-black transition-colors hover:bg-[#ddd] disabled:opacity-50"><span className="text-left"><span className="block text-[9px] font-bold tracking-[0.18em] text-black/55">READY WHEN YOU ARE</span><span className="mt-1 block text-base font-extrabold">LAUNCH FORTNITE</span></span><span className="grid h-9 w-9 place-items-center rounded-lg bg-black text-white"><Icon name="arrow" size={18}/></span></button></div></aside>
+    <main className="min-w-0 flex-1 overflow-y-auto bg-black px-5 py-5 sm:px-7 lg:px-9"><header className="mb-6 flex flex-wrap items-center justify-between gap-4 border-b border-white/5 pb-5"><div><p className="text-xs font-medium text-[#666]">Booster <span className="px-2 text-[#444]">/</span><span className="text-[#aaa]">{active.label}</span></p><h1 className="mt-2 text-2xl font-semibold tracking-[-0.04em] sm:text-3xl">{active.label}</h1></div><div className="flex items-center gap-3"><Pill tone={bridge?'green':'amber'}>{bridge?'MAIN PROCESS CONNECTED':'PREVIEW MODE'}</Pill><button title="Activity logs" onClick={()=>setActiveTab('logs')} className="grid h-10 w-10 place-items-center rounded-full border border-white/10 bg-[#111]"><Icon name="activity" size={17}/></button></div></header><div key={`${activeTab}-${activeSubtab[activeTab]||''}`} className="animate-[booster-enter_200ms_ease-out_both]">{renderContent()}</div></main>
+    {toast&&<div role="status" className={`fixed bottom-5 left-1/2 z-50 -translate-x-1/2 rounded-xl border px-5 py-3 text-sm font-semibold shadow-2xl backdrop-blur ${toast.tone==='green'?'border-emerald-300/20 bg-[#0d1712] text-emerald-100':toast.tone==='amber'?'border-amber-300/20 bg-[#19150c] text-amber-100':'border-white/10 bg-[#111] text-white'}`}>{toast.message}</div>}
+    <style>{'@keyframes booster-enter{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:translateY(0)}}'}</style>
+  </div>;
 }
 
 export default App;

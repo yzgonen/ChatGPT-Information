@@ -118,87 +118,6 @@ async function publishHardwareMetrics() {
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('booster:hardware-metrics', payload);
 }
 
-async function purgeStandbyMemory() {
-  assertWindows();
-  const powershell = String.raw`
-$ErrorActionPreference = 'Stop'
-$source = @'
-using System;
-using System.Runtime.InteropServices;
-public static class BoosterMemoryList {
-    [DllImport("ntdll.dll")]
-    private static extern int NtSetSystemInformation(int informationClass, ref int information, int informationLength);
-    public static int PurgeStandbyList() {
-        int command = 4;
-        return NtSetSystemInformation(80, ref command, sizeof(int));
-    }
-}
-'@
-Add-Type -TypeDefinition $source -Language CSharp
-$status = [BoosterMemoryList]::PurgeStandbyList()
-if ($status -ne 0) { throw ('Standby list purge failed with NTSTATUS 0x{0:X8}. Run Booster as Administrator.' -f $status) }
-'Windows standby memory list purged.'
-`;
-  return runProcess('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', powershell], { timeout: 30000 });
-}
-
-async function raiseDwmPriority() {
-  assertWindows();
-  // Keep the Windows desktop compositor alive. Force-terminating dwm.exe can blank the display.
-  const powershell = String.raw`
-$ErrorActionPreference = 'Stop'
-$processes = Get-Process -Name 'dwm' -ErrorAction Stop
-foreach ($process in $processes) { $process.PriorityClass = 'High' }
-'Raised priority for {0} DWM process(es).' -f $processes.Count
-`;
-  return runProcess('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', powershell], { timeout: 15000 });
-}
-
-async function clearNvidiaShaderCache() {
-  assertWindows();
-  const localAppData = process.env.LOCALAPPDATA;
-  if (!localAppData) throw new Error('LOCALAPPDATA is not set.');
-  const canonicalLocalAppData = await fs.realpath(localAppData);
-  const cacheRoot = path.resolve(localAppData, 'NVIDIA', 'DXCache');
-  const expectedNvidiaDirectory = path.resolve(canonicalLocalAppData, 'NVIDIA');
-  const actualNvidiaDirectory = await fs.realpath(path.dirname(cacheRoot)).catch((error) => {
-    if (error.code === 'ENOENT') return null;
-    throw error;
-  });
-  if (actualNvidiaDirectory && actualNvidiaDirectory.toLowerCase() !== expectedNvidiaDirectory.toLowerCase()) {
-    throw new Error('Refusing to clear a cache path outside the local NVIDIA directory.');
-  }
-  let root;
-  try {
-    root = await fs.lstat(cacheRoot);
-  } catch (error) {
-    if (error.code === 'ENOENT') return { deletedFiles: 0, skippedFiles: 0, message: 'NVIDIA DXCache was not found.' };
-    throw error;
-  }
-  if (!root.isDirectory() || root.isSymbolicLink()) throw new Error('NVIDIA DXCache is not a regular directory.');
-
-  let deletedFiles = 0;
-  let skippedFiles = 0;
-  const visit = async (directory) => {
-    for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
-      const entryPath = path.join(directory, entry.name);
-      if (entry.isSymbolicLink()) { skippedFiles += 1; continue; }
-      if (entry.isDirectory()) { await visit(entryPath); continue; }
-      if (!entry.isFile()) { skippedFiles += 1; continue; }
-      try {
-        await fs.unlink(entryPath);
-        deletedFiles += 1;
-      } catch (error) {
-        if (error.code === 'ENOENT') continue;
-        if (['EBUSY', 'EACCES', 'EPERM', 'UNKNOWN'].includes(error.code)) { skippedFiles += 1; continue; }
-        throw error;
-      }
-    }
-  };
-  await visit(cacheRoot);
-  return { deletedFiles, skippedFiles, message: 'NVIDIA cache files removed; the driver will recreate them as needed.' };
-}
-
 async function optimizeCpuPowerPlan() {
   assertWindows();
   const active = await runProcess('powercfg.exe', ['/getactivescheme'], { timeout: 10000 });
@@ -242,6 +161,96 @@ $items = Get-Process | Where-Object { $_.WorkingSet64 -ge 150MB -and $_.MainWind
   if (!Array.isArray(processes)) processes = processes ? [processes] : [];
   log(`Background memory scan returned ${processes.length} candidate process(es).`, 'INFO');
   return { scanned: true, processes, message: 'Listed large background memory users for review. Booster leaves other apps and browser update services running to protect open work and security updates.' };
+}
+
+async function scanController() {
+  assertWindows();
+  const powershell = String.raw`
+$ErrorActionPreference = 'Stop'
+$devices = @(Get-PnpDevice -PresentOnly | Where-Object { $_.Class -in @('HIDClass','USB') -and $_.FriendlyName -match 'controller|dualshock|wireless controller|playstation' } | Select-Object @{Name='name';Expression={$_.FriendlyName}},@{Name='status';Expression={$_.Status}},@{Name='class';Expression={$_.Class}},@{Name='instanceId';Expression={$_.InstanceId}})
+@{devices=$devices;scannedUtc=[DateTime]::UtcNow.ToString('o')} | ConvertTo-Json -Depth 4 -Compress
+`;
+  const output = await runProcess('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', powershell], { timeout: 20000 });
+  const line = output.split(/\r?\n/).filter((item) => item.trim().startsWith('{')).at(-1);
+  if (!line) throw new Error(output || 'Controller scan returned no result.');
+  const result = JSON.parse(line);
+  if (!Array.isArray(result.devices)) result.devices = result.devices ? [result.devices] : [];
+  return result;
+}
+
+async function getServiceStatus() {
+  assertWindows();
+  const powershell = String.raw`
+$ErrorActionPreference = 'Stop'
+$services = @(Get-CimInstance Win32_Service -Filter "Name='DiagTrack' OR Name='WerSvc' OR Name='SysMain' OR Name='wuauserv' OR Name='WbioSrvc'" | Select-Object @{Name='name';Expression={$_.Name}},@{Name='displayName';Expression={$_.DisplayName}},@{Name='status';Expression={$_.State}},@{Name='startMode';Expression={$_.StartMode}})
+@{services=$services;scannedUtc=[DateTime]::UtcNow.ToString('o')} | ConvertTo-Json -Depth 4 -Compress
+`;
+  const output = await runProcess('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', powershell], { timeout: 20000 });
+  const line = output.split(/\r?\n/).filter((item) => item.trim().startsWith('{')).at(-1);
+  if (!line) throw new Error(output || 'Service status scan returned no result.');
+  const result = JSON.parse(line);
+  if (!Array.isArray(result.services)) result.services = result.services ? [result.services] : [];
+  return result;
+}
+
+async function measureNetworkQuality() {
+  assertWindows();
+  const powershell = String.raw`
+$ErrorActionPreference = 'Stop'
+function Measure-Target([string]$Target) {
+  $replies = @(Test-Connection -ComputerName $Target -Count 5 -ErrorAction SilentlyContinue | ForEach-Object { [int]$_.ResponseTime })
+  $loss = [math]::Round((5 - $replies.Count) * 20, 1)
+  $average = $null; $jitter = $null
+  if ($replies.Count -gt 0) { $average = [math]::Round(($replies | Measure-Object -Average).Average, 1) }
+  if ($replies.Count -gt 1) {
+    $differences = for ($i = 1; $i -lt $replies.Count; $i++) { [math]::Abs($replies[$i] - $replies[$i - 1]) }
+    $jitter = [math]::Round(($differences | Measure-Object -Average).Average, 1)
+  }
+  return @{target=$Target;sent=5;received=$replies.Count;lossPercent=$loss;averageMs=$average;jitterMs=$jitter}
+}
+$gateway = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | Sort-Object RouteMetric,InterfaceMetric | Select-Object -First 1 -ExpandProperty NextHop
+$gatewayResult = if ($gateway -and $gateway -ne '0.0.0.0') { Measure-Target $gateway } else { @{target='Default gateway unavailable';sent=0;received=0;lossPercent=$null;averageMs=$null;jitterMs=$null} }
+$internetResult = Measure-Target '1.1.1.1'
+@{gateway=$gatewayResult;internet=$internetResult;measuredUtc=[DateTime]::UtcNow.ToString('o');note='ICMP samples; not game-server latency.'} | ConvertTo-Json -Depth 5 -Compress
+`;
+  const output = await runProcess('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', powershell], { timeout: 30000 });
+  const line = output.split(/\r?\n/).filter((item) => item.trim().startsWith('{')).at(-1);
+  if (!line) throw new Error(output || 'Network sample returned no result.');
+  return JSON.parse(line);
+}
+
+async function openSoundSettings() {
+  assertWindows();
+  await shell.openExternal('ms-settings:sound');
+  return { opened: true };
+}
+
+async function openMouseSettings() {
+  assertWindows();
+  await shell.openExternal('ms-settings:mousetouchpad');
+  return { opened: true };
+}
+
+async function openEpicLauncher() {
+  assertWindows();
+  const candidates = [
+    path.join(process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)', 'Epic Games', 'Launcher', 'Portal', 'Binaries', 'Win64', 'EpicGamesLauncher.exe'),
+    path.join(process.env.ProgramFiles || 'C:\\Program Files', 'Epic Games', 'Launcher', 'Portal', 'Binaries', 'Win64', 'EpicGamesLauncher.exe'),
+    path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Epic Games', 'Launcher', 'EpicGamesLauncher.exe')
+  ];
+  for (const candidate of candidates) {
+    try {
+      const stat = await fs.stat(candidate);
+      if (stat.isFile()) {
+        const error = await shell.openPath(candidate);
+        if (error) throw new Error(error);
+        return { opened: true, path: candidate };
+      }
+    } catch (error) {
+      if (error.code !== 'ENOENT' && !String(error.message).includes('The system cannot find')) throw error;
+    }
+  }
+  throw new Error('Epic Games Launcher was not found in its standard install locations. Open it from the Start menu, then use Library → Fortnite → Manage → Verify.');
 }
 
 function isPathInside(parentPath, candidatePath) {
@@ -671,11 +680,8 @@ async function runOptimizer() {
   const results = [];
   try {
     for (const [name, action] of [
-      ['Standby memory', purgeStandbyMemory],
       ['CPU power plan', optimizeCpuPowerPlan],
-      ['Background memory scan', auditBackgroundMemory],
-      ['Desktop Window Manager priority', raiseDwmPriority],
-      ['NVIDIA shader cache', clearNvidiaShaderCache]
+      ['Background memory scan', auditBackgroundMemory]
     ]) {
       try {
         const details = await action();
@@ -711,18 +717,23 @@ function registerIpcHandlers() {
   handle('booster:get-storage-overview', getStorageOverview);
   handle('booster:scan-drive-cleanup', scanDriveCleanup);
   handle('booster:delete-cleanup-candidates', moveCleanupCandidatesToRecycleBin);
+  handle('booster:scan-controller', scanController);
+  handle('booster:get-service-status', getServiceStatus);
+  handle('booster:measure-network-quality', measureNetworkQuality);
+  handle('booster:open-sound-settings', openSoundSettings);
+  handle('booster:open-mouse-settings', openMouseSettings);
+  handle('booster:open-epic-launcher', openEpicLauncher);
 }
 
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1200,
     height: 800,
-    minWidth: 1200,
-    minHeight: 800,
-    maxWidth: 1200,
-    maxHeight: 800,
-    resizable: false,
-    fullscreenable: false,
+    minWidth: 980,
+    minHeight: 620,
+    resizable: true,
+    maximizable: true,
+    fullscreenable: true,
     center: true,
     title: 'Booster',
     backgroundColor: '#000000',

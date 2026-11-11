@@ -11,7 +11,7 @@
 }
 
 * { box-sizing: border-box; }
-html, body, #root { width: 100%; min-width: 1180px; height: 100%; min-height: 720px; margin: 0; }
+html, body, #root { width: 100%; min-width: 0; height: 100%; min-height: 620px; margin: 0; }
 body { overflow: hidden; }
 button { font: inherit; }
 ::selection { color: #fff; background: rgb(255 255 255 / 20%); }
@@ -19,3 +19,7 @@ button { font: inherit; }
 ::-webkit-scrollbar-track { background: #050505; }
 ::-webkit-scrollbar-thumb { background: #292929; border-radius: 99px; }
 ::-webkit-scrollbar-thumb:hover { background: #3b3b3b; }
+
+@media (max-width: 1050px) {
+  html, body, #root { min-width: 0; }
+}
