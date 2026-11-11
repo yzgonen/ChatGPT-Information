@@ -1,6 +1,6 @@
 'use strict';
 
-const { app, BrowserWindow, ipcMain, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, dialog } = require('electron');
 const { randomUUID } = require('node:crypto');
 const fs = require('node:fs/promises');
 const os = require('node:os');
@@ -26,6 +26,25 @@ let mainWindow;
 let optimizerInProgress = false;
 let metricTimer;
 let previousCpuSample;
+const cleanupCandidates = new Map();
+
+const CLEANUP_PROTECTED_DIRECTORIES = new Set([
+  '$RECYCLE.BIN', 'SYSTEM VOLUME INFORMATION', 'WINDOWS', 'PROGRAM FILES',
+  'PROGRAM FILES (X86)', 'PROGRAMDATA', 'RECOVERY', 'CONFIG.MSI',
+  'WINDOWSAPPS', 'XBOXGAMES', 'STEAMLIBRARY', 'STEAM', 'EPIC GAMES',
+  'EPICGAMES', 'FORTNITE', 'FORTNITEGAME', 'RIOT GAMES', 'BATTLE.NET',
+  'UBISOFT GAME LAUNCHER', 'GOG GAMES', 'ORIGIN GAMES', 'GAMES',
+  'GAME LIBRARY', 'GAME LIBRARIES', 'GAMES LIBRARY', 'GAMESLIBRARY',
+  'APPLICATIONS', 'PROGRAMS'
+]);
+const CLEANUP_PROTECTED_EXTENSIONS = new Set([
+  '.exe', '.dll', '.sys', '.drv', '.ocx', '.msi', '.msp', '.msix', '.appx',
+  '.bat', '.cmd', '.ps1', '.vbs', '.com', '.scr', '.reg', '.lnk'
+]);
+const CLEANUP_TEMP_MIN_AGE_MS = 14 * 24 * 60 * 60 * 1000;
+const CLEANUP_LARGE_FILE_MIN_BYTES = 100 * 1024 * 1024;
+const CLEANUP_MAX_VISITED_FILES = 30000;
+const CLEANUP_MAX_RETURNED_ITEMS = 300;
 
 function log(message, level = 'INFO') {
   const entry = { time: new Date().toISOString(), level, message: String(message) };
@@ -223,6 +242,220 @@ $items = Get-Process | Where-Object { $_.WorkingSet64 -ge 150MB -and $_.MainWind
   if (!Array.isArray(processes)) processes = processes ? [processes] : [];
   log(`Background memory scan returned ${processes.length} candidate process(es).`, 'INFO');
   return { scanned: true, processes, message: 'Listed large background memory users for review. Booster leaves other apps and browser update services running to protect open work and security updates.' };
+}
+
+function isPathInside(parentPath, candidatePath) {
+  const parent = path.resolve(parentPath).toLowerCase();
+  const candidate = path.resolve(candidatePath).toLowerCase();
+  return candidate === parent || candidate.startsWith(`${parent}${path.sep.toLowerCase()}`);
+}
+
+function hasProtectedDirectorySegment(candidatePath) {
+  return path.resolve(candidatePath).split(path.sep).some((segment) => CLEANUP_PROTECTED_DIRECTORIES.has(segment.trim().toUpperCase()));
+}
+
+function isProtectedCleanupFile(candidatePath) {
+  return hasProtectedDirectorySegment(candidatePath) || CLEANUP_PROTECTED_EXTENSIONS.has(path.extname(candidatePath).toLowerCase());
+}
+
+async function getStorageOverview() {
+  assertWindows();
+  const drives = [];
+  for (const letter of ['C', 'D']) {
+    const root = `${letter}:\\`;
+    try {
+      const stats = await fs.statfs(root);
+      const totalBytes = Number(stats.blocks) * Number(stats.bsize);
+      const freeBytes = Number(stats.bavail) * Number(stats.bsize);
+      drives.push({ letter, root, available: true, totalBytes, freeBytes, usedBytes: Math.max(0, totalBytes - freeBytes) });
+    } catch (error) {
+      if (letter === 'C') throw new Error(`Could not read the C: drive: ${error.message}`);
+      drives.push({ letter, root, available: false, totalBytes: 0, freeBytes: 0, usedBytes: 0 });
+    }
+  }
+  return { drives };
+}
+
+async function scanDriveCleanup(letter) {
+  assertWindows();
+  const driveLetter = String(letter || '').toUpperCase();
+  if (!['C', 'D'].includes(driveLetter)) throw new TypeError('Only the C: and D: drives can be scanned.');
+  const driveRoot = `${driveLetter}:\\`;
+  const driveInfo = await fs.statfs(driveRoot).catch((error) => {
+    throw new Error(`The ${driveLetter}: drive is unavailable: ${error.message}`);
+  });
+  const driveTotalBytes = Number(driveInfo.blocks) * Number(driveInfo.bsize);
+  const driveFreeBytes = Number(driveInfo.bavail) * Number(driveInfo.bsize);
+  const scanRoots = [];
+  const addRoot = async (rootPath, kind, label) => {
+    if (!rootPath) return;
+    const resolved = path.resolve(rootPath);
+    if (!isPathInside(driveRoot, resolved) || isProtectedCleanupFile(resolved)) return;
+    const stat = await fs.lstat(resolved).catch(() => null);
+    if (!stat || !stat.isDirectory() || stat.isSymbolicLink()) return;
+    const canonical = await fs.realpath(resolved).catch(() => null);
+    if (!canonical || !isPathInside(driveRoot, canonical) || isProtectedCleanupFile(canonical)) return;
+    if (scanRoots.some((root) => isPathInside(root.path, canonical))) return;
+    scanRoots.push({ path: canonical, kind, label });
+  };
+
+  if (driveLetter === 'C') {
+    const localAppData = process.env.LOCALAPPDATA;
+    const userProfile = process.env.USERPROFILE;
+    await addRoot(localAppData ? path.join(localAppData, 'Temp') : process.env.TEMP, 'temporary', 'User temporary files');
+    if (userProfile) {
+      for (const folder of ['Downloads', 'Desktop', 'Documents', 'Videos']) {
+        await addRoot(path.join(userProfile, folder), 'review', folder);
+      }
+    }
+  } else {
+    scanRoots.push({ path: path.resolve(driveRoot), kind: 'review', label: 'D: root files', filesOnly: true });
+    const entries = await fs.readdir(driveRoot, { withFileTypes: true }).catch((error) => {
+      throw new Error(`Could not list the D: drive: ${error.message}`);
+    });
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+      if (entry.name.startsWith('.') || CLEANUP_PROTECTED_DIRECTORIES.has(entry.name.trim().toUpperCase())) continue;
+      await addRoot(path.join(driveRoot, entry.name), 'review', entry.name);
+    }
+    await addRoot(path.join(driveRoot, 'Temp'), 'temporary', 'D: temporary files');
+  }
+
+  const now = Date.now();
+  const tempCutoff = now - CLEANUP_TEMP_MIN_AGE_MS;
+  const candidates = [];
+  const seen = new Set();
+  let visitedFiles = 0;
+  let skippedFiles = 0;
+  let candidateBytes = 0;
+  let temporaryBytes = 0;
+  let reviewBytes = 0;
+  let truncated = false;
+
+  async function walk(directory, root, depth) {
+    if (visitedFiles >= CLEANUP_MAX_VISITED_FILES) { truncated = true; return; }
+    if (depth > 7 || hasProtectedDirectorySegment(directory)) return;
+    const entries = await fs.readdir(directory, { withFileTypes: true }).catch(() => { skippedFiles += 1; return []; });
+    for (const entry of entries) {
+      if (visitedFiles >= CLEANUP_MAX_VISITED_FILES) { truncated = true; return; }
+      const fullPath = path.join(directory, entry.name);
+      if (entry.isSymbolicLink() || entry.name.startsWith('$')) { skippedFiles += 1; continue; }
+      if (entry.isDirectory()) {
+        if (root.filesOnly) continue;
+        if (entry.name.startsWith('.') || CLEANUP_PROTECTED_DIRECTORIES.has(entry.name.trim().toUpperCase())) continue;
+        await walk(fullPath, root, depth + 1);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      visitedFiles += 1;
+      if (isProtectedCleanupFile(fullPath)) continue;
+      const stat = await fs.lstat(fullPath).catch(() => null);
+      if (!stat || !stat.isFile() || stat.isSymbolicLink() || stat.size <= 0) { skippedFiles += 1; continue; }
+      const isOldTemporary = root.kind === 'temporary' && stat.mtimeMs <= tempCutoff;
+      const isLargeReviewFile = root.kind === 'review' && stat.size >= CLEANUP_LARGE_FILE_MIN_BYTES;
+      if (!isOldTemporary && !isLargeReviewFile) continue;
+      const canonicalPath = await fs.realpath(fullPath).catch(() => null);
+      if (!canonicalPath || !isPathInside(root.path, canonicalPath) || isProtectedCleanupFile(canonicalPath)) { skippedFiles += 1; continue; }
+      const identity = canonicalPath.toLowerCase();
+      if (seen.has(identity)) continue;
+      seen.add(identity);
+      const id = randomUUID();
+      const candidate = {
+        id,
+        name: path.basename(canonicalPath),
+        path: canonicalPath,
+        bytes: stat.size,
+        modifiedUtc: stat.mtime.toISOString(),
+        category: isOldTemporary ? 'temporary' : 'review',
+        source: root.label,
+        allowedRoot: root.path,
+        safeToDelete: isOldTemporary,
+        note: isOldTemporary ? 'Temporary file older than 14 days; selected files go to the Recycle Bin.' : 'Large personal-data candidate. Review its full path and name before selecting it.'
+      };
+      candidates.push(candidate);
+      candidateBytes += stat.size;
+      if (isOldTemporary) temporaryBytes += stat.size;
+      else reviewBytes += stat.size;
+    }
+  }
+
+  for (const root of scanRoots) await walk(root.path, root, 0);
+  candidates.sort((left, right) => right.bytes - left.bytes);
+  const returned = candidates.slice(0, CLEANUP_MAX_RETURNED_ITEMS);
+  const returnedIds = new Set(returned.map((candidate) => candidate.id));
+  for (const candidate of candidates) {
+    if (!returnedIds.has(candidate.id)) continue;
+    cleanupCandidates.set(candidate.id, {
+      ...candidate,
+      expiresAt: now + 15 * 60 * 1000
+    });
+  }
+  for (const [id, candidate] of cleanupCandidates) if (candidate.expiresAt < now) cleanupCandidates.delete(id);
+
+  return {
+    drive: driveLetter,
+    totalBytes: driveTotalBytes,
+    freeBytes: driveFreeBytes,
+    scannedFiles: visitedFiles,
+    skippedItems: skippedFiles,
+    candidateCount: candidates.length,
+    candidateBytes,
+    temporaryBytes,
+    reviewBytes,
+    items: returned.map(({ id, name, path: candidatePath, bytes, modifiedUtc, category, source, safeToDelete, note }) => ({ id, name, path: candidatePath, bytes, modifiedUtc, category, source, safeToDelete, note })),
+    truncated,
+    message: driveLetter === 'C'
+      ? 'C: scan covers user Temp, Downloads, Desktop, Documents, and Videos. Windows and app folders are excluded.'
+      : 'D: scan checks files at the drive root and inside top-level folders except known Windows, application, and game-library folders. Large files are review-only.'
+  };
+}
+
+async function moveCleanupCandidatesToRecycleBin(request) {
+  assertWindows();
+  const ids = request?.ids;
+  if (!Array.isArray(ids) || ids.length < 1 || ids.length > 100 || ids.some((id) => typeof id !== 'string')) {
+    throw new TypeError('Select between 1 and 100 scan results to move to the Recycle Bin.');
+  }
+  const uniqueIds = [...new Set(ids)];
+  const selected = uniqueIds.map((id) => cleanupCandidates.get(id)).filter(Boolean);
+  if (selected.length !== uniqueIds.length) throw new Error('The scan results expired or changed. Scan the drive again before deleting.');
+  const totalBytes = selected.reduce((total, item) => total + item.bytes, 0);
+  const response = await dialog.showMessageBox(mainWindow, {
+    type: 'warning',
+    title: 'Review selected files',
+    message: `Move ${selected.length} selected file(s) to the Recycle Bin?`,
+    detail: `${(totalBytes / (1024 ** 3)).toFixed(2)} GB selected. Files are not permanently erased. Review every path in the list before continuing.`,
+    buttons: ['Cancel', 'Move to Recycle Bin'],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true
+  });
+  if (response.response !== 1) return { cancelled: true, deletedCount: 0, results: [] };
+
+  const results = [];
+  for (const candidate of selected) {
+    try {
+      if (candidate.expiresAt < Date.now() || !candidate.allowedRoot || isProtectedCleanupFile(candidate.path) || !isPathInside(candidate.allowedRoot, candidate.path)) {
+        throw new Error('This path is protected or the scan result expired.');
+      }
+      const stat = await fs.lstat(candidate.path);
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.size !== candidate.bytes || stat.mtime.toISOString() !== candidate.modifiedUtc) {
+        throw new Error('The file changed since the scan. Scan again before moving it.');
+      }
+      const canonicalPath = await fs.realpath(candidate.path);
+      if (!isPathInside(candidate.allowedRoot, canonicalPath) || canonicalPath.toLowerCase() !== candidate.path.toLowerCase()) {
+        throw new Error('The file path changed or resolves outside the scanned folder.');
+      }
+      await shell.trashItem(canonicalPath);
+      cleanupCandidates.delete(candidate.id);
+      results.push({ id: candidate.id, ok: true, name: candidate.name, bytes: candidate.bytes, message: 'Moved to Recycle Bin.' });
+    } catch (error) {
+      results.push({ id: candidate.id, ok: false, name: candidate.name, bytes: candidate.bytes, message: error.message });
+    }
+  }
+  const deletedCount = results.filter((item) => item.ok).length;
+  log(`Storage cleanup moved ${deletedCount} of ${selected.length} selected file(s) to the Recycle Bin.`, deletedCount === selected.length ? 'OK' : 'WARN');
+  return { cancelled: false, deletedCount, results };
 }
 
 async function applyWindowsTweaks(flags) {
@@ -475,6 +708,9 @@ function registerIpcHandlers() {
   handle('booster:apply-windows-tweaks', applyWindowsTweaks);
   handle('booster:update-fortnite-settings', updateFortniteSettings);
   handle('booster:run-network-optimization', runNetworkOptimization);
+  handle('booster:get-storage-overview', getStorageOverview);
+  handle('booster:scan-drive-cleanup', scanDriveCleanup);
+  handle('booster:delete-cleanup-candidates', moveCleanupCandidatesToRecycleBin);
 }
 
 function createWindow() {

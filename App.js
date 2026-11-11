@@ -74,6 +74,16 @@ function parseBridgeResult(result) {
   try { return JSON.parse(result); } catch { return { message: result }; }
 }
 
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes < 0) return '—';
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let value = bytes / 1024;
+  let index = 0;
+  while (value >= 1024 && index < units.length - 1) { value /= 1024; index += 1; }
+  return `${value.toFixed(value >= 100 ? 0 : 1)} ${units[index]}`;
+}
+
 function Icon({ name, size = 20, className = '' }) {
   const common = {
     width: size,
@@ -168,6 +178,11 @@ function App() {
   const [optimizingCpu, setOptimizingCpu] = useState(false);
   const [scanningMemory, setScanningMemory] = useState(false);
   const [memoryProcesses, setMemoryProcesses] = useState([]);
+  const [storageOverview, setStorageOverview] = useState(null);
+  const [cleanupScan, setCleanupScan] = useState(null);
+  const [cleanupSelection, setCleanupSelection] = useState({});
+  const [scanningDrive, setScanningDrive] = useState(null);
+  const [deletingCleanup, setDeletingCleanup] = useState(false);
   const [profile, setProfile] = useState({
     lobbyAnimations: false,
     mobileRenderPathway: false,
@@ -211,6 +226,17 @@ function App() {
     });
     return typeof unsubscribe === 'function' ? unsubscribe : undefined;
   }, [bridge]);
+
+  useEffect(() => {
+    let mounted = true;
+    if (!bridge?.getStorageOverview) return undefined;
+    bridge.getStorageOverview().then((result) => {
+      if (mounted) setStorageOverview(result);
+    }).catch((error) => {
+      if (mounted) appendLog(`Drive information unavailable: ${error.message}`, 'WARN');
+    });
+    return () => { mounted = false; };
+  }, [bridge, appendLog]);
 
   useEffect(() => {
     const node = document.getElementById('booster-console-end');
@@ -329,6 +355,56 @@ function App() {
       appendLog(error.message, 'ERROR');
     } finally {
       setScanningMemory(false);
+    }
+  };
+
+  const scanStorageDrive = async (letter) => {
+    if (scanningDrive || deletingCleanup) return;
+    setScanningDrive(letter);
+    setCleanupSelection({});
+    setCleanupScan(null);
+    appendLog(`Scanning selected cleanup areas on ${letter}:`, 'ACTION');
+    try {
+      const result = await callBridge('scanDriveCleanup', letter);
+      setCleanupScan(result);
+      appendLog(`${letter}: scan found ${result.candidateCount} candidate file(s); ${formatBytes(result.candidateBytes)} total.`, 'INFO');
+      if (result.truncated) notify('Scan limit reached; results are partial. Narrow the scan before continuing.', 'amber');
+      else notify(`${letter}: scan complete. Review every path before selecting files.`, 'green');
+    } catch (error) {
+      appendLog(error.message, 'ERROR');
+      notify(`Could not scan ${letter}:`, 'amber');
+    } finally {
+      setScanningDrive(null);
+    }
+  };
+
+  const removeSelectedCleanup = async () => {
+    const selectedIds = Object.keys(cleanupSelection).filter((id) => cleanupSelection[id]);
+    if (!selectedIds.length || deletingCleanup) return;
+    setDeletingCleanup(true);
+    try {
+      const result = await callBridge('deleteCleanupCandidates', { ids: selectedIds });
+      if (result.cancelled) {
+        notify('No files were moved.', 'neutral');
+        return;
+      }
+      const failed = (result.results || []).filter((item) => !item.ok);
+      for (const item of result.results || []) appendLog(`${item.name}: ${item.message}`, item.ok ? 'OK' : 'WARN');
+      notify(`${result.deletedCount} file(s) moved to the Recycle Bin${failed.length ? `; ${failed.length} could not be moved` : ''}.`, failed.length ? 'amber' : 'green');
+      setCleanupSelection({});
+      if (cleanupScan?.drive) {
+        const [freshScan, freshOverview] = await Promise.all([
+          callBridge('scanDriveCleanup', cleanupScan.drive),
+          callBridge('getStorageOverview')
+        ]);
+        setCleanupScan(freshScan);
+        setStorageOverview(freshOverview);
+      }
+    } catch (error) {
+      appendLog(error.message, 'ERROR');
+      notify('The selected files were not moved.', 'amber');
+    } finally {
+      setDeletingCleanup(false);
     }
   };
 
@@ -456,6 +532,42 @@ function App() {
           ['Memory', '16 GB RAM', 'Windows reports 16,214 MB available'],
           ['Display', '1920 × 1080', '144 Hz active mode']
         ].map(([label, value, detail]) => <div key={label} className="rounded-2xl border border-white/5 bg-[#0d0d0d] p-6"><p className="text-xs font-bold uppercase tracking-[0.16em] text-[#777]">{label}</p><p className="mt-4 text-xl font-semibold text-white">{value}</p><p className="mt-2 text-sm text-[#777]">{detail}</p></div>)}
+      </section>
+      <section className="rounded-2xl border border-white/5 bg-[#0d0d0d] p-6">
+        <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-start">
+          <div className="max-w-2xl"><h3 className="text-xl font-semibold text-white">Storage Cleanup</h3><p className="mt-2 text-sm leading-6 text-[#858585]">Check C: and D: for older temporary files and large files you may want to review. C: checks your user Temp, Downloads, Desktop, Documents, and Videos. D: checks files at its root and ordinary top-level folders while skipping known Windows, app, and game folders.</p></div>
+          <div className="flex shrink-0 gap-2">
+            {['C', 'D'].map((letter) => {
+              const drive = storageOverview?.drives?.find((item) => item.letter === letter);
+              return <button key={letter} type="button" onClick={() => scanStorageDrive(letter)} disabled={scanningDrive !== null || deletingCleanup || (drive && !drive.available)} className="rounded-xl border border-white/10 bg-[#171717] px-4 py-3 text-xs font-bold text-white transition-colors hover:bg-[#222] disabled:cursor-not-allowed disabled:opacity-40">{scanningDrive === letter ? 'SCANNING…' : `SCAN ${letter}:`}</button>;
+            })}
+          </div>
+        </div>
+        <div className="mt-5 grid gap-3 sm:grid-cols-2">
+          {['C', 'D'].map((letter) => {
+            const drive = storageOverview?.drives?.find((item) => item.letter === letter);
+            return <div key={letter} className="rounded-xl border border-white/5 bg-black/30 p-4">
+              <div className="flex items-center justify-between gap-3"><span className="font-semibold text-white">{letter}: drive {letter === 'C' ? '· SSD' : ''}</span><span className="text-xs text-[#777]">{drive?.available ? `${formatBytes(drive.freeBytes)} free` : drive ? 'Not available' : 'Checking…'}</span></div>
+              {drive?.available && <><div className="mt-3 h-2 overflow-hidden rounded-full bg-white/[0.07]"><div className="h-full rounded-full bg-emerald-300" style={{ width: `${drive.totalBytes ? Math.max(0, Math.min(100, (drive.usedBytes / drive.totalBytes) * 100)) : 0}%` }} /></div><p className="mt-2 text-xs text-[#666]">{formatBytes(drive.usedBytes)} used of {formatBytes(drive.totalBytes)}</p></>}
+            </div>;
+          })}
+        </div>
+        <div className="mt-4 flex items-start gap-3 rounded-xl border border-amber-300/10 bg-amber-200/[0.035] p-4 text-sm leading-6 text-[#aaa]"><Icon name="warning" className="mt-0.5 shrink-0 text-amber-200" size={18} /><p>Nothing is deleted automatically. Files are shown with their full path for review; checked files are moved to the Recycle Bin only after a Windows confirmation. Older Temp files are candidates, while large personal files are review-only. System, app, and game folders are excluded. To reclaim the space immediately, empty the Recycle Bin after reviewing it.</p></div>
+        {cleanupScan && <div className="mt-5">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/5 pb-4"><div><h4 className="font-semibold text-white">{cleanupScan.drive}: scan results</h4><p className="mt-1 text-xs text-[#777]">{cleanupScan.scannedFiles.toLocaleString()} files checked · {cleanupScan.candidateCount} candidates · {formatBytes(cleanupScan.temporaryBytes)} old Temp · {formatBytes(cleanupScan.reviewBytes)} large files to review</p></div><span className="text-xs text-[#777]">Select only files you recognize</span></div>
+          {cleanupScan.truncated && <p className="mt-3 rounded-lg bg-amber-200/[0.05] p-3 text-xs leading-5 text-amber-100/80">The scan reached its safety limit and these results may be incomplete. Scan a narrower area or review the current results carefully.</p>}
+          <div className="mt-3 max-h-[380px] space-y-2 overflow-y-auto pr-1">
+            {cleanupScan.items.length ? cleanupScan.items.map((item) => <label key={item.id} className="flex cursor-pointer items-start gap-3 rounded-xl border border-white/5 bg-black/30 p-4 transition-colors hover:border-white/10">
+              <input type="checkbox" className="mt-1 h-4 w-4 shrink-0 accent-emerald-300" checked={Boolean(cleanupSelection[item.id])} onChange={(event) => setCleanupSelection((current) => ({ ...current, [item.id]: event.target.checked }))} />
+              <span className="min-w-0 flex-1"><span className="flex flex-wrap items-center gap-2"><span className="break-all font-medium text-white">{item.name}</span><span className={`rounded-full px-2 py-1 text-[10px] font-bold tracking-wide ${item.category === 'temporary' ? 'bg-emerald-300/10 text-emerald-200' : 'bg-amber-300/10 text-amber-100'}`}>{item.category === 'temporary' ? 'OLD TEMP' : 'REVIEW'}</span><span className="text-xs text-[#999]">{formatBytes(item.bytes)}</span></span><span className="mt-1 block break-all font-mono text-[11px] leading-5 text-[#777]">{item.path}</span><span className="mt-1 block text-[11px] text-[#666]">{item.source} · modified {new Date(item.modifiedUtc).toLocaleDateString()}</span></span>
+            </label>) : <p className="rounded-xl border border-white/5 bg-black/30 p-5 text-sm text-[#777]">No cleanup candidates were found in the checked folders.</p>}
+          </div>
+          {(() => {
+            const selectedBytes = cleanupScan.items.filter((item) => cleanupSelection[item.id]).reduce((sum, item) => sum + item.bytes, 0);
+            const selectedCount = cleanupScan.items.filter((item) => cleanupSelection[item.id]).length;
+            return <div className="mt-4 flex flex-wrap items-center justify-between gap-3"><p className="text-sm text-[#888]">{selectedCount} selected · {formatBytes(selectedBytes)}</p><button type="button" onClick={removeSelectedCleanup} disabled={!selectedCount || deletingCleanup} className="rounded-xl bg-white px-5 py-3 text-xs font-bold text-black transition-colors hover:bg-[#ddd] disabled:cursor-not-allowed disabled:opacity-40">{deletingCleanup ? 'MOVING FILES…' : 'MOVE SELECTED TO RECYCLE BIN'}</button></div>;
+          })()}
+        </div>}
       </section>
       <section className="space-y-4">
         <article className="rounded-2xl border border-white/5 bg-[#0d0d0d] p-6">

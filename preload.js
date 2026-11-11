@@ -17,6 +17,9 @@ contextBridge.exposeInMainWorld('booster', Object.freeze({
   applyWindowsTweaks: (flags) => ipcRenderer.invoke('booster:apply-windows-tweaks', flags),
   updateFortniteSettings: (flags) => ipcRenderer.invoke('booster:update-fortnite-settings', flags),
   runNetworkOptimization: (options) => ipcRenderer.invoke('booster:run-network-optimization', options),
+  getStorageOverview: () => ipcRenderer.invoke('booster:get-storage-overview'),
+  scanDriveCleanup: (driveLetter) => ipcRenderer.invoke('booster:scan-drive-cleanup', driveLetter),
+  deleteCleanupCandidates: (request) => ipcRenderer.invoke('booster:delete-cleanup-candidates', request),
   onLog: (callback) => subscribe('booster:log', callback),
   onHardwareMetrics: (callback) => subscribe('booster:hardware-metrics', callback)
 }));
