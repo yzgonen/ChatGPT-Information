@@ -21,6 +21,11 @@ const NETWORK_OPTION_IDS = new Set([
   'tcpNoDelay', 'tcpAckFrequency', 'disableThrottling', 'flushDns', 'cloudflareDns', 'tcpAutoTuning'
 ]);
 const WINDOWS_TWEAK_IDS = new Set(['win32PriorityThreads', 'disableGameDvr']);
+const WINUTIL_GAMING_PROFILE = Object.freeze([
+  'WPFTweaksRestorePoint',
+  'WPFToggleGameMode',
+  'WPFTweaksDisplay'
+]);
 
 let mainWindow;
 let optimizerInProgress = false;
@@ -698,6 +703,68 @@ async function runOptimizer() {
   }
 }
 
+async function runWinUtilGamingProfile() {
+  assertWindows();
+  if (optimizerInProgress) throw new Error('An optimization sequence is already running.');
+  optimizerInProgress = true;
+  const profileDirectory = path.join(app.getPath('userData'), 'profiles');
+  const profilePath = path.join(profileDirectory, 'booster-gaming-profile.json');
+  try {
+    await fs.mkdir(profileDirectory, { recursive: true });
+    await fs.writeFile(profilePath, `${JSON.stringify(WINUTIL_GAMING_PROFILE, null, 2)}\n`, 'utf8');
+    const profilePathBase64 = Buffer.from(profilePath, 'utf8').toString('base64');
+    const innerPowerShell = String.raw`
+$ErrorActionPreference = 'Stop'
+$profilePath = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${profilePathBase64}'))
+$source = Invoke-RestMethod -Uri 'https://github.com/ChrisTitusTech/winutil/releases/latest/download/winutil.ps1' -ErrorAction Stop
+if ([string]::IsNullOrWhiteSpace($source)) { throw 'The official WinUtil release returned an empty script.' }
+$winutil = [ScriptBlock]::Create($source)
+& $winutil -Config $profilePath -Run
+if ($global:LASTEXITCODE -and $global:LASTEXITCODE -ne 0) { exit $global:LASTEXITCODE }
+`;
+    const innerCommand = Buffer.from(innerPowerShell, 'utf16le').toString('base64');
+    const powershell = String.raw`
+$ErrorActionPreference = 'Stop'
+$command = '${innerCommand}'
+$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+$principal = [Security.Principal.WindowsPrincipal]::new($identity)
+$isAdmin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if ($isAdmin) {
+  & ([ScriptBlock]::Create([Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($command))))
+  if ($global:LASTEXITCODE -and $global:LASTEXITCODE -ne 0) { exit $global:LASTEXITCODE }
+  exit 0
+}
+$powershellPath = Join-Path $PSHOME 'powershell.exe'
+$outputPath = Join-Path $env:TEMP ('booster-winutil-' + [guid]::NewGuid().ToString('N') + '.out')
+$errorPath = Join-Path $env:TEMP ('booster-winutil-' + [guid]::NewGuid().ToString('N') + '.err')
+try {
+  $process = Start-Process -FilePath $powershellPath -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-EncodedCommand',$command) -Verb RunAs -WindowStyle Hidden -Wait -PassThru -RedirectStandardOutput $outputPath -RedirectStandardError $errorPath -ErrorAction Stop
+  if (Test-Path -LiteralPath $outputPath) { Get-Content -LiteralPath $outputPath -Raw }
+  if ($process.ExitCode -ne 0) {
+    $details = if (Test-Path -LiteralPath $errorPath) { Get-Content -LiteralPath $errorPath -Raw } else { 'No error details were returned.' }
+    throw "WinUtil exited with code $($process.ExitCode): $details"
+  }
+} finally {
+  Remove-Item -LiteralPath $outputPath,$errorPath -Force -ErrorAction SilentlyContinue
+}
+`;
+    log('Starting the curated Chris Titus Tech gaming profile in a hidden PowerShell process. Windows may request administrator approval.', 'ACTION');
+    const output = await runProcess('powershell.exe', [
+      '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-Command', powershell
+    ], { timeout: 300000, maxBuffer: 2 * 1024 * 1024 });
+    const outputTail = output.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).slice(-8);
+    if (outputTail.length) log(`WinUtil report: ${outputTail.join(' · ')}`, 'INFO');
+    log(`WinUtil gaming profile completed. Profile file: ${profilePath}`, 'OK');
+    return {
+      ok: true,
+      profilePath,
+      message: 'WinUtil applied the Booster gaming profile: create a restore point, enable Game Mode, and reduce Windows visual effects.'
+    };
+  } finally {
+    optimizerInProgress = false;
+  }
+}
+
 function handle(channel, handler) {
   ipcMain.handle(channel, async (event, ...args) => {
     assertTrustedSender(event);
@@ -709,6 +776,7 @@ function handle(channel, handler) {
 function registerIpcHandlers() {
   handle('booster:launch-fortnite', launchFortnite);
   handle('booster:run-optimizer', runOptimizer);
+  handle('booster:run-winutil-gaming-profile', runWinUtilGamingProfile);
   handle('booster:optimize-cpu', optimizeCpuPowerPlan);
   handle('booster:scan-background-memory', auditBackgroundMemory);
   handle('booster:apply-windows-tweaks', applyWindowsTweaks);
