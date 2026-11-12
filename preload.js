@@ -24,9 +24,11 @@ contextBridge.exposeInMainWorld('booster', Object.freeze({
   scanController: () => ipcRenderer.invoke('booster:scan-controller'),
   getServiceStatus: () => ipcRenderer.invoke('booster:get-service-status'),
   measureNetworkQuality: () => ipcRenderer.invoke('booster:measure-network-quality'),
+  measureRegion: (request) => ipcRenderer.invoke('booster:measure-region', request),
   openSoundSettings: () => ipcRenderer.invoke('booster:open-sound-settings'),
   openMouseSettings: () => ipcRenderer.invoke('booster:open-mouse-settings'),
   openEpicLauncher: () => ipcRenderer.invoke('booster:open-epic-launcher'),
   onLog: (callback) => subscribe('booster:log', callback),
-  onHardwareMetrics: (callback) => subscribe('booster:hardware-metrics', callback)
+  onHardwareMetrics: (callback) => subscribe('booster:hardware-metrics', callback),
+  onStorageProgress: (callback) => subscribe('booster:storage-progress', callback)
 }));

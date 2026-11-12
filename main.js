@@ -35,7 +35,7 @@ const cleanupCandidates = new Map();
 
 const CLEANUP_PROTECTED_DIRECTORIES = new Set([
   '$RECYCLE.BIN', 'SYSTEM VOLUME INFORMATION', 'WINDOWS', 'PROGRAM FILES',
-  'PROGRAM FILES (X86)', 'PROGRAMDATA', 'RECOVERY', 'CONFIG.MSI',
+  'PROGRAM FILES (X86)', 'RECOVERY', 'CONFIG.MSI',
   'WINDOWSAPPS', 'XBOXGAMES', 'STEAMLIBRARY', 'STEAM', 'EPIC GAMES',
   'EPICGAMES', 'FORTNITE', 'FORTNITEGAME', 'RIOT GAMES', 'BATTLE.NET',
   'UBISOFT GAME LAUNCHER', 'GOG GAMES', 'ORIGIN GAMES', 'GAMES',
@@ -48,8 +48,20 @@ const CLEANUP_PROTECTED_EXTENSIONS = new Set([
 ]);
 const CLEANUP_TEMP_MIN_AGE_MS = 14 * 24 * 60 * 60 * 1000;
 const CLEANUP_LARGE_FILE_MIN_BYTES = 100 * 1024 * 1024;
-const CLEANUP_MAX_VISITED_FILES = 30000;
+const CLEANUP_MAX_VISITED_FILES = 150000;
 const CLEANUP_MAX_RETURNED_ITEMS = 300;
+const REGION_PROBE_HOSTS = Object.freeze({
+  'eu-central': 'ec2.eu-central-1.amazonaws.com',
+  'eu-west': 'ec2.eu-west-1.amazonaws.com',
+  'na-east': 'ec2.us-east-1.amazonaws.com',
+  'na-central': 'ec2.us-east-2.amazonaws.com',
+  'na-west': 'ec2.us-west-2.amazonaws.com',
+  brazil: 'ec2.sa-east-1.amazonaws.com',
+  asia: 'ec2.ap-northeast-1.amazonaws.com',
+  oceania: 'ec2.ap-southeast-2.amazonaws.com',
+  'middle-east': 'ec2.me-south-1.amazonaws.com',
+  'south-africa': 'ec2.af-south-1.amazonaws.com'
+});
 
 function log(message, level = 'INFO') {
   const entry = { time: new Date().toISOString(), level, message: String(message) };
@@ -315,13 +327,17 @@ async function scanDriveCleanup(letter) {
 
   if (driveLetter === 'C') {
     const localAppData = process.env.LOCALAPPDATA;
+    const roamingAppData = process.env.APPDATA;
     const userProfile = process.env.USERPROFILE;
     await addRoot(localAppData ? path.join(localAppData, 'Temp') : process.env.TEMP, 'temporary', 'User temporary files');
     if (userProfile) {
-      for (const folder of ['Downloads', 'Desktop', 'Documents', 'Videos']) {
+      for (const folder of ['Downloads', 'Desktop', 'Documents', 'Videos', 'Pictures', 'Music', 'Saved Games']) {
         await addRoot(path.join(userProfile, folder), 'review', folder);
       }
     }
+    await addRoot(localAppData, 'review', 'Local AppData and application caches');
+    await addRoot(roamingAppData, 'review', 'Roaming AppData and application data');
+    await addRoot(process.env.ProgramData, 'review', 'ProgramData application data');
   } else {
     scanRoots.push({ path: path.resolve(driveRoot), kind: 'review', label: 'D: root files', filesOnly: true });
     const entries = await fs.readdir(driveRoot, { withFileTypes: true }).catch((error) => {
@@ -345,10 +361,25 @@ async function scanDriveCleanup(letter) {
   let temporaryBytes = 0;
   let reviewBytes = 0;
   let truncated = false;
+  let lastProgressAt = 0;
+
+  function publishStorageProgress(currentDirectory) {
+    const nowProgress = Date.now();
+    if (nowProgress - lastProgressAt < 350) return;
+    lastProgressAt = nowProgress;
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('booster:storage-progress', {
+        drive: driveLetter,
+        scannedFiles: visitedFiles,
+        candidates: candidates.length,
+        currentDirectory: String(currentDirectory).slice(0, 240)
+      });
+    }
+  }
 
   async function walk(directory, root, depth) {
     if (visitedFiles >= CLEANUP_MAX_VISITED_FILES) { truncated = true; return; }
-    if (depth > 7 || hasProtectedDirectorySegment(directory)) return;
+    if (depth > 12 || hasProtectedDirectorySegment(directory)) return;
     const entries = await fs.readdir(directory, { withFileTypes: true }).catch(() => { skippedFiles += 1; return []; });
     for (const entry of entries) {
       if (visitedFiles >= CLEANUP_MAX_VISITED_FILES) { truncated = true; return; }
@@ -356,12 +387,13 @@ async function scanDriveCleanup(letter) {
       if (entry.isSymbolicLink() || entry.name.startsWith('$')) { skippedFiles += 1; continue; }
       if (entry.isDirectory()) {
         if (root.filesOnly) continue;
-        if (entry.name.startsWith('.') || CLEANUP_PROTECTED_DIRECTORIES.has(entry.name.trim().toUpperCase())) continue;
+        if (CLEANUP_PROTECTED_DIRECTORIES.has(entry.name.trim().toUpperCase())) continue;
         await walk(fullPath, root, depth + 1);
         continue;
       }
       if (!entry.isFile()) continue;
       visitedFiles += 1;
+      if (visitedFiles % 250 === 0) publishStorageProgress(directory);
       if (isProtectedCleanupFile(fullPath)) continue;
       const stat = await fs.lstat(fullPath).catch(() => null);
       if (!stat || !stat.isFile() || stat.isSymbolicLink() || stat.size <= 0) { skippedFiles += 1; continue; }
@@ -393,7 +425,11 @@ async function scanDriveCleanup(letter) {
     }
   }
 
-  for (const root of scanRoots) await walk(root.path, root, 0);
+  log(`Storage scan ${driveLetter}: started across ${scanRoots.length} selected folder tree(s); system and installed game folders are excluded.`, 'ACTION');
+  for (const root of scanRoots) {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('booster:storage-progress', { drive: driveLetter, scannedFiles: visitedFiles, candidates: candidates.length, currentDirectory: root.label });
+    await walk(root.path, root, 0);
+  }
   candidates.sort((left, right) => right.bytes - left.bytes);
   const returned = candidates.slice(0, CLEANUP_MAX_RETURNED_ITEMS);
   const returnedIds = new Set(returned.map((candidate) => candidate.id));
@@ -419,9 +455,33 @@ async function scanDriveCleanup(letter) {
     items: returned.map(({ id, name, path: candidatePath, bytes, modifiedUtc, category, source, safeToDelete, note }) => ({ id, name, path: candidatePath, bytes, modifiedUtc, category, source, safeToDelete, note })),
     truncated,
     message: driveLetter === 'C'
-      ? 'C: scan covers user Temp, Downloads, Desktop, Documents, and Videos. Windows and app folders are excluded.'
-      : 'D: scan checks files at the drive root and inside top-level folders except known Windows, application, and game-library folders. Large files are review-only.'
+      ? 'C: scan covers user files, Local/Roaming AppData, ProgramData, and old user temporary files. System and game-install folders are excluded; large files are review-only.'
+      : 'D: scan checks files at the drive root and recursively inside ordinary top-level folders. Known system and game-library folders are excluded; large files are review-only.'
   };
+}
+
+async function measureRegion(request) {
+  assertWindows();
+  const region = String(request?.region || '');
+  const host = REGION_PROBE_HOSTS[region];
+  if (!host) throw new TypeError('Select a supported region probe.');
+  const encoded = Buffer.from(JSON.stringify({ region, host }), 'utf8').toString('base64');
+  const powershell = String.raw`
+$ErrorActionPreference = 'Stop'
+$target = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encoded}')) | ConvertFrom-Json
+$times = @(Test-Connection -ComputerName $target.host -Count 5 -ErrorAction SilentlyContinue | ForEach-Object { [double]$_.ResponseTime })
+$loss = [math]::Round((5 - $times.Count) * 20, 1)
+$average = $null; $jitter = $null
+if ($times.Count -gt 0) { $average = [math]::Round(($times | Measure-Object -Average).Average, 1) }
+if ($times.Count -gt 1) { $differences = for ($i=1; $i -lt $times.Count; $i++) { [math]::Abs($times[$i] - $times[$i-1]) }; $jitter = [math]::Round(($differences | Measure-Object -Average).Average, 1) }
+@{region=$target.region;host=$target.host;sent=5;received=$times.Count;lossPercent=$loss;averageMs=$average;jitterMs=$jitter;measuredUtc=[DateTime]::UtcNow.ToString('o');note='Regional cloud ICMP probe, not a Fortnite or Minecraft server measurement.'} | ConvertTo-Json -Compress
+`;
+  const output = await runProcess('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', powershell], { timeout: 20000 });
+  const line = output.split(/\r?\n/).filter((item) => item.trim().startsWith('{')).at(-1);
+  if (!line) throw new Error(output || 'Regional network probe returned no result.');
+  const result = JSON.parse(line);
+  log(`${result.region} regional probe: ${result.averageMs == null ? 'no ICMP reply' : `${result.averageMs} ms`} average; ${result.lossPercent}% loss. This is not the game server route.`, result.received ? 'INFO' : 'WARN');
+  return result;
 }
 
 async function moveCleanupCandidatesToRecycleBin(request) {
@@ -716,7 +776,7 @@ async function runWinUtilGamingProfile() {
     const innerPowerShell = String.raw`
 $ErrorActionPreference = 'Stop'
 $profilePath = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${profilePathBase64}'))
-$source = Invoke-RestMethod -Uri 'https://github.com/ChrisTitusTech/winutil/releases/latest/download/winutil.ps1' -ErrorAction Stop
+$source = Invoke-RestMethod -Uri 'https://christitus.com/win' -ErrorAction Stop
 if ([string]::IsNullOrWhiteSpace($source)) { throw 'The official WinUtil release returned an empty script.' }
 $winutil = [ScriptBlock]::Create($source)
 & $winutil -Config $profilePath -Run
@@ -758,7 +818,7 @@ try {
     return {
       ok: true,
       profilePath,
-      message: 'WinUtil applied the Booster gaming profile: create a restore point, enable Game Mode, and reduce Windows visual effects.'
+      message: 'WinUtil completed the selected Booster profile: create a restore point, enable Windows Game Mode, and set Windows visual effects for performance. Reboot if Windows or WinUtil reports one is needed; this does not promise a fixed FPS increase.'
     };
   } finally {
     optimizerInProgress = false;
@@ -788,6 +848,7 @@ function registerIpcHandlers() {
   handle('booster:scan-controller', scanController);
   handle('booster:get-service-status', getServiceStatus);
   handle('booster:measure-network-quality', measureNetworkQuality);
+  handle('booster:measure-region', measureRegion);
   handle('booster:open-sound-settings', openSoundSettings);
   handle('booster:open-mouse-settings', openMouseSettings);
   handle('booster:open-epic-launcher', openEpicLauncher);
