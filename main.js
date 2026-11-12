@@ -412,6 +412,7 @@ async function scanDriveCleanup(letter) {
         path: canonicalPath,
         bytes: stat.size,
         modifiedUtc: stat.mtime.toISOString(),
+        accessedUtc: stat.atime.toISOString(),
         category: isOldTemporary ? 'temporary' : 'review',
         source: root.label,
         allowedRoot: root.path,
@@ -452,7 +453,7 @@ async function scanDriveCleanup(letter) {
     candidateBytes,
     temporaryBytes,
     reviewBytes,
-    items: returned.map(({ id, name, path: candidatePath, bytes, modifiedUtc, category, source, safeToDelete, note }) => ({ id, name, path: candidatePath, bytes, modifiedUtc, category, source, safeToDelete, note })),
+    items: returned.map(({ id, name, path: candidatePath, bytes, modifiedUtc, accessedUtc, category, source, safeToDelete, note }) => ({ id, name, path: candidatePath, bytes, modifiedUtc, accessedUtc, category, source, safeToDelete, note })),
     truncated,
     message: driveLetter === 'C'
       ? 'C: scan covers user files, Local/Roaming AppData, ProgramData, and old user temporary files. System and game-install folders are excluded; large files are review-only.'
