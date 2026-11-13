@@ -318,13 +318,15 @@ async function scanDriveCleanup(letter) {
   const addRoot = async (rootPath, kind, label) => {
     if (!rootPath) return;
     const resolved = path.resolve(rootPath);
-    if (!isPathInside(driveRoot, resolved) || isProtectedCleanupFile(resolved)) return;
+    const isInstalledProgramInventoryRoot = kind === 'inventory'
+      && ['PROGRAM FILES', 'PROGRAM FILES (X86)', 'PROGRAMS'].includes(path.basename(resolved).trim().toUpperCase());
+    if (!isPathInside(driveRoot, resolved) || (isProtectedCleanupFile(resolved) && !isInstalledProgramInventoryRoot)) return;
     const stat = await fs.lstat(resolved).catch(() => null);
     if (!stat || !stat.isDirectory() || stat.isSymbolicLink()) return;
     const canonical = await fs.realpath(resolved).catch(() => null);
-    if (!canonical || !isPathInside(driveRoot, canonical) || isProtectedCleanupFile(canonical)) return;
+    if (!canonical || !isPathInside(driveRoot, canonical) || (isProtectedCleanupFile(canonical) && !isInstalledProgramInventoryRoot)) return;
     if (scanRoots.some((root) => isPathInside(root.path, canonical))) return;
-    scanRoots.push({ path: canonical, kind, label });
+    scanRoots.push({ path: canonical, kind, label, inventoryOnly: isInstalledProgramInventoryRoot, maxDepth: isInstalledProgramInventoryRoot ? 8 : 12 });
   };
 
   if (driveLetter === 'C') {
@@ -340,6 +342,9 @@ async function scanDriveCleanup(letter) {
     await addRoot(localAppData, 'review', 'Local AppData and application caches');
     await addRoot(roamingAppData, 'review', 'Roaming AppData and application data');
     await addRoot(process.env.ProgramData, 'review', 'ProgramData application data');
+    await addRoot(path.join(localAppData || '', 'Programs'), 'inventory', 'Installed applications (Local AppData)');
+    await addRoot(path.join(driveRoot, 'Program Files'), 'inventory', 'Installed applications (Program Files)');
+    await addRoot(path.join(driveRoot, 'Program Files (x86)'), 'inventory', 'Installed applications (Program Files x86)');
   } else {
     scanRoots.push({ path: path.resolve(driveRoot), kind: 'review', label: 'D: root files', filesOnly: true });
     const entries = await fs.readdir(driveRoot, { withFileTypes: true }).catch((error) => {
@@ -357,6 +362,7 @@ async function scanDriveCleanup(letter) {
   const tempCutoff = now - CLEANUP_TEMP_MIN_AGE_MS;
   const candidates = [];
   const seen = new Set();
+  const folderSizes = new Map();
   let visitedFiles = 0;
   let skippedFiles = 0;
   let candidateBytes = 0;
@@ -379,9 +385,32 @@ async function scanDriveCleanup(letter) {
     }
   }
 
+  function accountFolderSize(filePath, root, bytes) {
+    let directory = path.dirname(filePath);
+    let levels = 0;
+    while (isPathInside(root.path, directory) && levels <= 8) {
+      const relative = path.relative(root.path, directory);
+      const depth = relative ? relative.split(path.sep).filter(Boolean).length : 0;
+      if (depth <= 4) {
+        const key = root.path.toLowerCase() + '|' + directory.toLowerCase();
+        const current = folderSizes.get(key) || { path: directory, source: root.label, bytes: 0, files: 0, depth };
+        current.bytes += bytes;
+        current.files += 1;
+        folderSizes.set(key, current);
+      }
+      if (path.resolve(directory).toLowerCase() === path.resolve(root.path).toLowerCase()) break;
+      directory = path.dirname(directory);
+      levels += 1;
+    }
+  }
+
   async function walk(directory, root, depth) {
     if (visitedFiles >= CLEANUP_MAX_VISITED_FILES) { truncated = true; return; }
-    if (depth > 12 || hasProtectedDirectorySegment(directory)) return;
+    const relativeDirectory = path.relative(root.path, directory);
+    const protectedInventoryChild = root.inventoryOnly && relativeDirectory
+      ? relativeDirectory.split(path.sep).some((segment) => CLEANUP_PROTECTED_DIRECTORIES.has(segment.trim().toUpperCase()))
+      : false;
+    if (depth > root.maxDepth || protectedInventoryChild || (!root.inventoryOnly && hasProtectedDirectorySegment(directory))) return;
     const entries = await fs.readdir(directory, { withFileTypes: true }).catch(() => { skippedFiles += 1; return []; });
     for (const entry of entries) {
       if (visitedFiles >= CLEANUP_MAX_VISITED_FILES) { truncated = true; return; }
@@ -396,9 +425,10 @@ async function scanDriveCleanup(letter) {
       if (!entry.isFile()) continue;
       visitedFiles += 1;
       if (visitedFiles % 250 === 0) publishStorageProgress(directory);
-      if (isProtectedCleanupFile(fullPath)) continue;
       const stat = await fs.lstat(fullPath).catch(() => null);
       if (!stat || !stat.isFile() || stat.isSymbolicLink() || stat.size <= 0) { skippedFiles += 1; continue; }
+      accountFolderSize(fullPath, root, stat.size);
+      if (root.inventoryOnly || isProtectedCleanupFile(fullPath)) continue;
       const isOldTemporary = root.kind === 'temporary' && stat.mtimeMs <= tempCutoff;
       const isLargeReviewFile = root.kind === 'review' && stat.size >= CLEANUP_LARGE_FILE_MIN_BYTES;
       if (!isOldTemporary && !isLargeReviewFile) continue;
@@ -434,6 +464,10 @@ async function scanDriveCleanup(letter) {
     await walk(root.path, root, 0);
   }
   candidates.sort((left, right) => right.bytes - left.bytes);
+  const folders = [...folderSizes.values()]
+    .filter((folder) => folder.bytes >= 256 * 1024 * 1024)
+    .sort((left, right) => right.bytes - left.bytes)
+    .slice(0, 50);
   const returned = candidates.slice(0, CLEANUP_MAX_RETURNED_ITEMS);
   const returnedIds = new Set(returned.map((candidate) => candidate.id));
   for (const candidate of candidates) {
@@ -456,10 +490,11 @@ async function scanDriveCleanup(letter) {
     temporaryBytes,
     reviewBytes,
     items: returned.map(({ id, name, path: candidatePath, bytes, modifiedUtc, accessedUtc, category, source, safeToDelete, note }) => ({ id, name, path: candidatePath, bytes, modifiedUtc, accessedUtc, category, source, safeToDelete, note })),
+    folders: folders.map(({ path: folderPath, source, bytes, files, depth }) => ({ path: folderPath, source, bytes, files, depth })),
     truncated,
     message: driveLetter === 'C'
-      ? 'C: scan covers user files, Local/Roaming AppData, ProgramData, and old user temporary files. System and game-install folders are excluded; large files are review-only.'
-      : 'D: scan checks files at the drive root and recursively inside ordinary top-level folders. Known system and game-library folders are excluded; large files are review-only.'
+      ? 'C: scan checks user files, Local/Roaming AppData, ProgramData, and installed application folders. Installed applications are inventory-only; only old Temp files are marked safe to delete.'
+      : 'D: scan checks files at the drive root and ordinary top-level folders. Known system and game-library folders are excluded; large files are review-only.'
   };
 }
 
