@@ -271,9 +271,11 @@ async function openEpicLauncher() {
 }
 
 function isPathInside(parentPath, candidatePath) {
-  const parent = path.resolve(parentPath).toLowerCase();
-  const candidate = path.resolve(candidatePath).toLowerCase();
-  return candidate === parent || candidate.startsWith(`${parent}${path.sep.toLowerCase()}`);
+  const parent = path.resolve(parentPath);
+  const candidate = path.resolve(candidatePath);
+  const relative = path.relative(parent, candidate);
+  if (!relative) return true;
+  return !path.isAbsolute(relative) && relative !== '..' && !relative.startsWith(`..${path.sep}`);
 }
 
 function hasProtectedDirectorySegment(candidatePath) {
