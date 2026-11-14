@@ -47,7 +47,7 @@ const CLEANUP_PROTECTED_EXTENSIONS = new Set([
   '.bat', '.cmd', '.ps1', '.vbs', '.com', '.scr', '.reg', '.lnk'
 ]);
 const CLEANUP_TEMP_MIN_AGE_MS = 14 * 24 * 60 * 60 * 1000;
-const CLEANUP_LARGE_FILE_MIN_BYTES = 100 * 1024 * 1024;
+const CLEANUP_LARGE_FILE_MIN_BYTES = 50 * 1024 * 1024;
 const CLEANUP_MAX_VISITED_FILES = 150000;
 const CLEANUP_MAX_RETURNED_ITEMS = 300;
 const REGION_PROBE_HOSTS = Object.freeze({
@@ -345,6 +345,7 @@ async function scanDriveCleanup(letter) {
     await addRoot(path.join(localAppData || '', 'Programs'), 'inventory', 'Installed applications (Local AppData)');
     await addRoot(path.join(driveRoot, 'Program Files'), 'inventory', 'Installed applications (Program Files)');
     await addRoot(path.join(driveRoot, 'Program Files (x86)'), 'inventory', 'Installed applications (Program Files x86)');
+    await addRoot(userProfile, 'review', 'Other user profile files');
   } else {
     scanRoots.push({ path: path.resolve(driveRoot), kind: 'review', label: 'D: root files', filesOnly: true });
     const entries = await fs.readdir(driveRoot, { withFileTypes: true }).catch((error) => {
@@ -364,6 +365,8 @@ async function scanDriveCleanup(letter) {
   const seen = new Set();
   const folderSizes = new Map();
   let visitedFiles = 0;
+  let visitedDirectories = 0;
+  let skippedDirectories = 0;
   let skippedFiles = 0;
   let candidateBytes = 0;
   let temporaryBytes = 0;
@@ -379,6 +382,7 @@ async function scanDriveCleanup(letter) {
       mainWindow.webContents.send('booster:storage-progress', {
         drive: driveLetter,
         scannedFiles: visitedFiles,
+        scannedDirectories: visitedDirectories,
         candidates: candidates.length,
         currentDirectory: String(currentDirectory).slice(0, 240)
       });
@@ -411,11 +415,538 @@ async function scanDriveCleanup(letter) {
       ? relativeDirectory.split(path.sep).some((segment) => CLEANUP_PROTECTED_DIRECTORIES.has(segment.trim().toUpperCase()))
       : false;
     if (depth > root.maxDepth || protectedInventoryChild || (!root.inventoryOnly && hasProtectedDirectorySegment(directory))) return;
-    const entries = await fs.readdir(directory, { withFileTypes: true }).catch(() => { skippedFiles += 1; return []; });
+    visitedDirectories += 1;
+    const entries = await fs.readdir(directory, { withFileTypes: true }).catch(() => { skippedDirectories += 1; return []; });
     for (const entry of entries) {
       if (visitedFiles >= CLEANUP_MAX_VISITED_FILES) { truncated = true; return; }
       const fullPath = path.join(directory, entry.name);
-      if (entry.isSymbolicLink() || entry.name.startsWith('$')) { skippedFiles += 1; continue; }
+      if (root.label === 'Other user profile files' && scanRoots.some((knownRoot) => knownRoot !== root && isPathInside(knownRoot.path, fullPath))) continue;
+      if (entry.isSymbolicLink() || entry.name.startsWith('
+      if (entry.isDirectory()) {
+        if (root.filesOnly) continue;
+        if (CLEANUP_PROTECTED_DIRECTORIES.has(entry.name.trim().toUpperCase())) continue;
+        await walk(fullPath, root, depth + 1);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      visitedFiles += 1;
+      if (visitedFiles % 250 === 0) publishStorageProgress(directory);
+      const stat = await fs.lstat(fullPath).catch(() => null);
+      if (!stat || !stat.isFile() || stat.isSymbolicLink() || stat.size <= 0) { skippedFiles += 1; continue; }
+      accountFolderSize(fullPath, root, stat.size);
+      if (root.inventoryOnly || isProtectedCleanupFile(fullPath)) continue;
+      const isOldTemporary = root.kind === 'temporary' && stat.mtimeMs <= tempCutoff;
+      const isLargeReviewFile = root.kind === 'review' && stat.size >= CLEANUP_LARGE_FILE_MIN_BYTES;
+      if (!isOldTemporary && !isLargeReviewFile) continue;
+      const canonicalPath = await fs.realpath(fullPath).catch(() => null);
+      if (!canonicalPath || !isPathInside(root.path, canonicalPath) || isProtectedCleanupFile(canonicalPath)) { skippedFiles += 1; continue; }
+      const identity = canonicalPath.toLowerCase();
+      if (seen.has(identity)) continue;
+      seen.add(identity);
+      const id = randomUUID();
+      const candidate = {
+        id,
+        name: path.basename(canonicalPath),
+        path: canonicalPath,
+        bytes: stat.size,
+        modifiedUtc: stat.mtime.toISOString(),
+        accessedUtc: stat.atime.toISOString(),
+        category: isOldTemporary ? 'temporary' : 'review',
+        source: root.label,
+        allowedRoot: root.path,
+        safeToDelete: isOldTemporary,
+        note: isOldTemporary ? 'Temporary file older than 14 days; selected files go to the Recycle Bin.' : 'Large personal-data candidate. Review its full path and name before selecting it.'
+      };
+      candidates.push(candidate);
+      candidateBytes += stat.size;
+      if (isOldTemporary) temporaryBytes += stat.size;
+      else reviewBytes += stat.size;
+    }
+  }
+
+  log(`Storage scan ${driveLetter}: started across ${scanRoots.length} selected folder tree(s); system and installed game folders are excluded.`, 'ACTION');
+  for (const root of scanRoots) {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('booster:storage-progress', { drive: driveLetter, scannedFiles: visitedFiles, candidates: candidates.length, currentDirectory: root.label });
+    await walk(root.path, root, 0);
+  }
+  candidates.sort((left, right) => right.bytes - left.bytes);
+  const folders = [...folderSizes.values()]
+    .filter((folder) => folder.bytes >= 256 * 1024 * 1024)
+    .sort((left, right) => right.bytes - left.bytes)
+    .slice(0, 50);
+  const returned = candidates.slice(0, CLEANUP_MAX_RETURNED_ITEMS);
+  const returnedIds = new Set(returned.map((candidate) => candidate.id));
+  for (const candidate of candidates) {
+    if (!returnedIds.has(candidate.id)) continue;
+    cleanupCandidates.set(candidate.id, {
+      ...candidate,
+      expiresAt: now + 15 * 60 * 1000
+    });
+  }
+  for (const [id, candidate] of cleanupCandidates) if (candidate.expiresAt < now) cleanupCandidates.delete(id);
+
+  return {
+    drive: driveLetter,
+    totalBytes: driveTotalBytes,
+    freeBytes: driveFreeBytes,
+    scannedFiles: visitedFiles,
+    scannedDirectories: visitedDirectories,
+    skippedDirectories,
+    skippedItems: skippedFiles,
+    candidateCount: candidates.length,
+    candidateBytes,
+    temporaryBytes,
+    reviewBytes,
+    items: returned.map(({ id, name, path: candidatePath, bytes, modifiedUtc, accessedUtc, category, source, safeToDelete, note }) => ({ id, name, path: candidatePath, bytes, modifiedUtc, accessedUtc, category, source, safeToDelete, note })),
+    folders: folders.map(({ path: folderPath, source, bytes, files, depth }) => ({ path: folderPath, source, bytes, files, depth })),
+    truncated,
+    message: driveLetter === 'C'
+      ? 'C: scan checks known user folders, the remaining user profile, Local/Roaming AppData, ProgramData, and installed application folders. Installed applications are inventory-only; only old Temp files are marked safe to delete.'
+      : 'D: scan checks files at the drive root and ordinary top-level folders. Known system and game-library folders are excluded; large files are review-only.'
+  };
+}
+
+async function measureRegion(request) {
+  assertWindows();
+  const region = String(request?.region || '');
+  const host = REGION_PROBE_HOSTS[region];
+  if (!host) throw new TypeError('Select a supported region probe.');
+  const encoded = Buffer.from(JSON.stringify({ region, host }), 'utf8').toString('base64');
+  const powershell = String.raw`
+$ErrorActionPreference = 'Stop'
+$target = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encoded}')) | ConvertFrom-Json
+$times = @(Test-Connection -ComputerName $target.host -Count 5 -ErrorAction SilentlyContinue | ForEach-Object { [double]$_.ResponseTime })
+$loss = [math]::Round((5 - $times.Count) * 20, 1)
+$average = $null; $jitter = $null
+if ($times.Count -gt 0) { $average = [math]::Round(($times | Measure-Object -Average).Average, 1) }
+if ($times.Count -gt 1) { $differences = for ($i=1; $i -lt $times.Count; $i++) { [math]::Abs($times[$i] - $times[$i-1]) }; $jitter = [math]::Round(($differences | Measure-Object -Average).Average, 1) }
+@{region=$target.region;host=$target.host;sent=5;received=$times.Count;lossPercent=$loss;averageMs=$average;jitterMs=$jitter;measuredUtc=[DateTime]::UtcNow.ToString('o');note='Regional cloud ICMP probe, not a Fortnite or Minecraft server measurement.'} | ConvertTo-Json -Compress
+`;
+  const output = await runProcess('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', powershell], { timeout: 20000 });
+  const line = output.split(/\r?\n/).filter((item) => item.trim().startsWith('{')).at(-1);
+  if (!line) throw new Error(output || 'Regional network probe returned no result.');
+  const result = JSON.parse(line);
+  log(`${result.region} regional probe: ${result.averageMs == null ? 'no ICMP reply' : `${result.averageMs} ms`} average; ${result.lossPercent}% loss. This is not the game server route.`, result.received ? 'INFO' : 'WARN');
+  return result;
+}
+
+async function moveCleanupCandidatesToRecycleBin(request) {
+  assertWindows();
+  const ids = request?.ids;
+  if (!Array.isArray(ids) || ids.length < 1 || ids.length > 100 || ids.some((id) => typeof id !== 'string')) {
+    throw new TypeError('Select between 1 and 100 scan results to move to the Recycle Bin.');
+  }
+  const uniqueIds = [...new Set(ids)];
+  const selected = uniqueIds.map((id) => cleanupCandidates.get(id)).filter(Boolean);
+  if (selected.length !== uniqueIds.length) throw new Error('The scan results expired or changed. Scan the drive again before deleting.');
+  const totalBytes = selected.reduce((total, item) => total + item.bytes, 0);
+  const response = await dialog.showMessageBox(mainWindow, {
+    type: 'warning',
+    title: 'Review selected files',
+    message: `Move ${selected.length} selected file(s) to the Recycle Bin?`,
+    detail: `${(totalBytes / (1024 ** 3)).toFixed(2)} GB selected. Files are not permanently erased. Review every path in the list before continuing.`,
+    buttons: ['Cancel', 'Move to Recycle Bin'],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true
+  });
+  if (response.response !== 1) return { cancelled: true, deletedCount: 0, results: [] };
+
+  const results = [];
+  for (const candidate of selected) {
+    try {
+      if (candidate.expiresAt < Date.now() || !candidate.allowedRoot || isProtectedCleanupFile(candidate.path) || !isPathInside(candidate.allowedRoot, candidate.path)) {
+        throw new Error('This path is protected or the scan result expired.');
+      }
+      const stat = await fs.lstat(candidate.path);
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.size !== candidate.bytes || stat.mtime.toISOString() !== candidate.modifiedUtc) {
+        throw new Error('The file changed since the scan. Scan again before moving it.');
+      }
+      const canonicalPath = await fs.realpath(candidate.path);
+      if (!isPathInside(candidate.allowedRoot, canonicalPath) || canonicalPath.toLowerCase() !== candidate.path.toLowerCase()) {
+        throw new Error('The file path changed or resolves outside the scanned folder.');
+      }
+      await shell.trashItem(canonicalPath);
+      cleanupCandidates.delete(candidate.id);
+      results.push({ id: candidate.id, ok: true, name: candidate.name, bytes: candidate.bytes, message: 'Moved to Recycle Bin.' });
+    } catch (error) {
+      results.push({ id: candidate.id, ok: false, name: candidate.name, bytes: candidate.bytes, message: error.message });
+    }
+  }
+  const deletedCount = results.filter((item) => item.ok).length;
+  log(`Storage cleanup moved ${deletedCount} of ${selected.length} selected file(s) to the Recycle Bin.`, deletedCount === selected.length ? 'OK' : 'WARN');
+  return { cancelled: false, deletedCount, results };
+}
+
+async function applyWindowsTweaks(flags) {
+  assertWindows();
+  if (!flags || typeof flags !== 'object' || Array.isArray(flags)) throw new TypeError('Windows system options must be an object.');
+  for (const [key, value] of Object.entries(flags)) {
+    if (!WINDOWS_TWEAK_IDS.has(key) || typeof value !== 'boolean') throw new Error(`Unsupported Windows system option: ${key}`);
+  }
+  if (!Object.keys(flags).length) return { ok: true, results: [], message: 'No Windows system options were selected.' };
+  const encodedFlags = Buffer.from(JSON.stringify(flags), 'utf8').toString('base64');
+  const powershell = String.raw`
+$ErrorActionPreference = 'Stop'
+$flags = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encodedFlags}')) | ConvertFrom-Json
+$local = $env:LOCALAPPDATA
+$backupDirectory = Join-Path $local 'Booster\backups'
+New-Item -ItemType Directory -Path $backupDirectory -Force | Out-Null
+$targets = @(
+  @{ id='win32PriorityThreads'; path='HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl'; name='Win32PrioritySeparation'; enabled=0x26; disabled=2 },
+  @{ id='disableGameDvr'; path='HKCU:\System\GameConfigStore'; name='GameDVR_Enabled'; enabled=0; disabled=1 },
+  @{ id='disableGameDvr'; path='HKLM:\SOFTWARE\Policies\Microsoft\Windows\GameDVR'; name='AllowGameDVR'; enabled=0; disabled=1 }
+)
+$backup = [ordered]@{ createdUtc=[DateTime]::UtcNow.ToString('o'); values=@{} }
+foreach ($target in $targets) {
+  if (-not $flags.PSObject.Properties[$target.id]) { continue }
+  $item = Get-ItemProperty -LiteralPath $target.path -Name $target.name -ErrorAction SilentlyContinue
+  $oldValue = 0
+  if ($item -and $null -ne $item.($target.name)) { $oldValue = $item.($target.name) }
+  $backup.values["$($target.path)|$($target.name)"] = $oldValue
+}
+$backupPath = Join-Path $backupDirectory ('windows-system-' + (Get-Date -Format 'yyyyMMdd-HHmmss-fff') + '.json')
+$backup | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $backupPath -Encoding utf8
+$results = [System.Collections.Generic.List[object]]::new()
+foreach ($target in $targets) {
+  if (-not $flags.PSObject.Properties[$target.id]) { continue }
+  try {
+    New-Item -Path $target.path -Force | Out-Null
+    $value = if ($flags.$($target.id)) { $target.enabled } else { $target.disabled }
+    New-ItemProperty -LiteralPath $target.path -Name $target.name -PropertyType DWord -Value $value -Force | Out-Null
+    $results.Add(@{name=$target.name;ok=$true;value=$value;message=('Set {0} to {1}.' -f $target.name,$value)})
+  } catch {
+    $results.Add(@{name=$target.name;ok=$false;message=$_.Exception.Message})
+  }
+}
+@{ok=($results.Where({ -not $_.ok }).Count -eq 0);backupPath=$backupPath;results=@($results)} | ConvertTo-Json -Depth 6 -Compress
+`;
+  const output = await runProcess('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', powershell], { timeout: 30000 });
+  const jsonLine = output.split(/\r?\n/).filter((line) => line.trim().startsWith('{')).at(-1);
+  if (!jsonLine) throw new Error(output || 'Windows system script returned no result.');
+  const result = JSON.parse(jsonLine);
+  log(`Windows system settings saved. Backup: ${result.backupPath}.`, result.ok ? 'OK' : 'WARN');
+  return result;
+}
+
+function decodeIni(buffer) {
+  if (buffer.length >= 2 && buffer[0] === 0xff && buffer[1] === 0xfe) return { text: buffer.subarray(2).toString('utf16le'), encoding: 'utf16le', bom: Buffer.from([0xff, 0xfe]) };
+  if (buffer.length >= 2 && buffer[0] === 0xfe && buffer[1] === 0xff) {
+    const swapped = Buffer.from(buffer.subarray(2));
+    for (let i = 0; i + 1 < swapped.length; i += 2) [swapped[i], swapped[i + 1]] = [swapped[i + 1], swapped[i]];
+    return { text: swapped.toString('utf16le'), encoding: 'utf16le', bom: Buffer.from([0xfe, 0xff]), bigEndian: true };
+  }
+  if (buffer.length >= 3 && buffer[0] === 0xef && buffer[1] === 0xbb && buffer[2] === 0xbf) return { text: buffer.subarray(3).toString('utf8'), encoding: 'utf8', bom: Buffer.from([0xef, 0xbb, 0xbf]) };
+  return { text: buffer.toString('utf8'), encoding: 'utf8', bom: Buffer.alloc(0) };
+}
+
+function encodeIni(text, format) {
+  let body = Buffer.from(text, format.encoding);
+  if (format.bigEndian) {
+    body = Buffer.from(body);
+    for (let i = 0; i + 1 < body.length; i += 2) [body[i], body[i + 1]] = [body[i + 1], body[i]];
+  }
+  return Buffer.concat([format.bom, body]);
+}
+
+function setIniValue(text, sectionName, key, value) {
+  const newline = text.includes('\r\n') ? '\r\n' : '\n';
+  const lines = text.split(/\r?\n/);
+  const sectionHeader = `[${sectionName}]`;
+  let start = lines.findIndex((line) => line.trim().toLowerCase() === sectionHeader.toLowerCase());
+  if (start === -1) {
+    if (lines.length && lines[lines.length - 1] !== '') lines.push('');
+    lines.push(sectionHeader);
+    start = lines.length - 1;
+  }
+  let end = lines.length;
+  for (let i = start + 1; i < lines.length; i += 1) {
+    if (/^\s*\[[^\]]+\]\s*$/.test(lines[i])) { end = i; break; }
+  }
+  const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const keyPattern = new RegExp(`^\\s*${escapedKey}\\s*=`, 'i');
+  for (let i = start + 1; i < end; i += 1) {
+    if (keyPattern.test(lines[i])) { lines[i] = `${key}=${value}`; return lines.join(newline); }
+  }
+  lines.splice(end, 0, `${key}=${value}`);
+  return lines.join(newline);
+}
+
+async function updateFortniteSettings(flags) {
+  assertWindows();
+  if (!flags || typeof flags !== 'object' || Array.isArray(flags)) throw new TypeError('Fortnite settings must be an object.');
+  for (const key of Object.keys(flags)) {
+    if (!Object.hasOwn(FORTNITE_SETTINGS, key) || typeof flags[key] !== 'boolean') throw new Error(`Unsupported Fortnite profile flag: ${key}`);
+  }
+  const changes = Object.entries(flags).map(([flag, enabled]) => {
+    const item = FORTNITE_SETTINGS[flag];
+    return [item.section, item.key, enabled ? item.enabled : item.disabled];
+  });
+  if (!changes.length) return { changed: false, message: 'No profile settings were selected.' };
+
+  const localAppData = process.env.LOCALAPPDATA;
+  if (!localAppData) throw new Error('LOCALAPPDATA is not set.');
+  const configPath = path.resolve(localAppData, 'FortniteGame', 'Saved', 'Config', 'WindowsClient', 'GameUserSettings.ini');
+  const expectedParent = path.resolve(await fs.realpath(localAppData), 'FortniteGame', 'Saved', 'Config', 'WindowsClient');
+  const actualParent = await fs.realpath(path.dirname(configPath));
+  if (actualParent.toLowerCase() !== expectedParent.toLowerCase()) throw new Error('Refusing to write outside the Fortnite settings folder.');
+  const stat = await fs.lstat(configPath);
+  if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('Fortnite settings path is not a regular file.');
+
+  const original = await fs.readFile(configPath);
+  const format = decodeIni(original);
+  let updatedText = format.text;
+  for (const [section, key, value] of changes) updatedText = setIniValue(updatedText, section, key, value);
+  const updated = encodeIni(updatedText, format);
+  if (original.equals(updated)) {
+    await runProcess('attrib.exe', ['+R', configPath], { timeout: 10000 });
+    return { changed: false, readOnlyRestored: true, message: 'The selected settings already match the file; Read-Only is set.' };
+  }
+
+  const backupPath = `${configPath}.bak`;
+  const temporaryPath = `${configPath}.${randomUUID()}.tmp`;
+  try {
+    const backupStat = await fs.lstat(backupPath);
+    if (!backupStat.isFile() || backupStat.isSymbolicLink()) throw new Error('The Fortnite backup path is not a regular file.');
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+  await fs.copyFile(configPath, backupPath);
+  await runProcess('attrib.exe', ['-R', configPath], { timeout: 10000 });
+  try {
+    await fs.writeFile(temporaryPath, updated, { flag: 'wx' });
+    await fs.rename(temporaryPath, configPath);
+  } catch (error) {
+    await fs.rm(temporaryPath, { force: true }).catch(() => {});
+    throw error;
+  } finally {
+    await runProcess('attrib.exe', ['+R', configPath], { timeout: 10000 });
+  }
+  return { changed: true, backupPath, readOnlyRestored: true, settingsChanged: changes.map(([, key]) => key) };
+}
+
+async function runNetworkOptimization(request) {
+  assertWindows();
+  const selected = request?.options;
+  if (!Array.isArray(selected) || selected.some((id) => typeof id !== 'string' || !NETWORK_OPTION_IDS.has(id))) {
+    throw new TypeError('Network options contain an unsupported setting.');
+  }
+  if (selected.length === 0) return { ok: true, results: [] };
+  const encodedOptions = Buffer.from(JSON.stringify([...new Set(selected)]), 'utf8').toString('base64');
+  const powershell = String.raw`
+$ErrorActionPreference = 'Stop'
+$selected = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encodedOptions}')) | ConvertFrom-Json
+$local = $env:LOCALAPPDATA
+$backupDirectory = Join-Path $local 'Booster\backups'
+New-Item -ItemType Directory -Path $backupDirectory -Force | Out-Null
+$adapter = Get-NetAdapter -Physical | Where-Object { $_.Status -eq 'Up' } | Sort-Object -Property LinkSpeed -Descending | Select-Object -First 1
+if (-not $adapter) { throw 'No active physical network adapter was found.' }
+$interfaceKey = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\$($adapter.InterfaceGuid)"
+$profileKey = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile'
+$backup = [ordered]@{ createdUtc = [DateTime]::UtcNow.ToString('o'); adapterName = $adapter.Name; interfaceGuid = $adapter.InterfaceGuid; dns = @((Get-DnsClientServerAddress -InterfaceIndex $adapter.ifIndex -AddressFamily IPv4).ServerAddresses); registry = @{} }
+foreach ($pair in @(@($interfaceKey, 'TcpNoDelay'), @($interfaceKey, 'TcpAckFrequency'), @($profileKey, 'NetworkThrottlingIndex'))) {
+  $registryPath = $pair[0]; $propertyName = $pair[1]
+  $value = 0
+  $key = Get-ItemProperty -LiteralPath $registryPath -Name $propertyName -ErrorAction SilentlyContinue
+  if ($key -and $null -ne $key.$propertyName) { $value = $key.$propertyName }
+  $backup.registry["$registryPath|$propertyName"] = $value
+}
+$backupPath = Join-Path $backupDirectory ('network-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.json')
+$backup | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $backupPath -Encoding utf8
+$results = [System.Collections.Generic.List[object]]::new()
+foreach ($option in $selected) {
+  try {
+    switch ($option) {
+      'tcpNoDelay' { New-ItemProperty -LiteralPath $interfaceKey -Name 'TcpNoDelay' -PropertyType DWord -Value 1 -Force | Out-Null; $results.Add(@{name=$option;ok=$true;message='TCPNoDelay set for the active adapter.'}) }
+      'tcpAckFrequency' { New-ItemProperty -LiteralPath $interfaceKey -Name 'TcpAckFrequency' -PropertyType DWord -Value 1 -Force | Out-Null; $results.Add(@{name=$option;ok=$true;message='TCPAckFrequency set for the active adapter.'}) }
+      'disableThrottling' { New-ItemProperty -LiteralPath $profileKey -Name 'NetworkThrottlingIndex' -PropertyType DWord -Value ([int]-1) -Force | Out-Null; $results.Add(@{name=$option;ok=$true;message='NetworkThrottlingIndex set to 0xffffffff.'}) }
+      'flushDns' { $output = & ipconfig.exe /flushdns 2>&1; if ($LASTEXITCODE -ne 0) { throw ($output -join ' ') }; $results.Add(@{name=$option;ok=$true;message='DNS resolver cache flushed with ipconfig.'}) }
+      'cloudflareDns' { Set-DnsClientServerAddress -InterfaceIndex $adapter.ifIndex -ServerAddresses @('1.1.1.1','1.0.0.1'); $results.Add(@{name=$option;ok=$true;message='Cloudflare DNS set on the active adapter.'}) }
+      'tcpAutoTuning' { $output = & netsh.exe int tcp set global autotuninglevel=normal 2>&1; if ($LASTEXITCODE -ne 0) { throw ($output -join ' ') }; $output = & netsh.exe int tcp set global ecncapability=enabled 2>&1; if ($LASTEXITCODE -ne 0) { throw ($output -join ' ') }; $results.Add(@{name=$option;ok=$true;message='TCP auto-tuning set to normal and ECN enabled.'}) }
+    }
+  } catch { $results.Add(@{name=$option;ok=$false;message=$_.Exception.Message}) }
+}
+@{ok=($results.Where({ -not $_.ok }).Count -eq 0);backupPath=$backupPath;adapter=$adapter.Name;results=@($results)} | ConvertTo-Json -Depth 7 -Compress
+`;
+  const output = await runProcess('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', powershell], { timeout: 45000 });
+  const jsonLine = output.split(/\r?\n/).filter((line) => line.trim().startsWith('{')).at(-1);
+  if (!jsonLine) throw new Error(output || 'Windows network script returned no result.');
+  const result = JSON.parse(jsonLine);
+  log(`Network update ran on ${result.adapter}; backup saved at ${result.backupPath}.`, result.ok ? 'OK' : 'WARN');
+  return result;
+}
+
+async function launchFortnite() {
+  assertWindows();
+  await shell.openExternal(FORTNITE_PROTOCOL_URL);
+  log('Epic Games Fortnite launch protocol handed to Windows.', 'OK');
+  return { launched: true };
+}
+
+async function runOptimizer() {
+  assertWindows();
+  if (optimizerInProgress) throw new Error('The optimizer is already running.');
+  optimizerInProgress = true;
+  log('Starting one-click system maintenance.', 'ACTION');
+  const results = [];
+  try {
+    for (const [name, action] of [
+      ['CPU power plan', optimizeCpuPowerPlan],
+      ['Background memory scan', auditBackgroundMemory]
+    ]) {
+      try {
+        const details = await action();
+        results.push({ name, ok: true, details });
+        log(`${name}: ${typeof details === 'string' ? details : JSON.stringify(details)}`, 'OK');
+      } catch (error) {
+        results.push({ name, ok: false, error: error.message });
+        log(`${name}: ${error.message}`, 'WARN');
+      }
+    }
+    return { ok: results.every((result) => result.ok), results };
+  } finally {
+    optimizerInProgress = false;
+  }
+}
+
+async function runWinUtilGamingProfile() {
+  assertWindows();
+  if (optimizerInProgress) throw new Error('An optimization sequence is already running.');
+  optimizerInProgress = true;
+  const profileDirectory = path.join(app.getPath('userData'), 'profiles');
+  const profilePath = path.join(profileDirectory, 'booster-gaming-profile.json');
+  try {
+    await fs.mkdir(profileDirectory, { recursive: true });
+    await fs.writeFile(profilePath, `${JSON.stringify(WINUTIL_GAMING_PROFILE, null, 2)}\n`, 'utf8');
+    const profilePathBase64 = Buffer.from(profilePath, 'utf8').toString('base64');
+    const innerPowerShell = String.raw`
+$ErrorActionPreference = 'Stop'
+$profilePath = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${profilePathBase64}'))
+$source = Invoke-RestMethod -Uri 'https://christitus.com/win' -ErrorAction Stop
+if ([string]::IsNullOrWhiteSpace($source)) { throw 'The official WinUtil release returned an empty script.' }
+$winutil = [ScriptBlock]::Create($source)
+& $winutil -Config $profilePath -Run
+if ($global:LASTEXITCODE -and $global:LASTEXITCODE -ne 0) { exit $global:LASTEXITCODE }
+`;
+    const innerCommand = Buffer.from(innerPowerShell, 'utf16le').toString('base64');
+    const powershell = String.raw`
+$ErrorActionPreference = 'Stop'
+$command = '${innerCommand}'
+$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+$principal = [Security.Principal.WindowsPrincipal]::new($identity)
+$isAdmin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if ($isAdmin) {
+  & ([ScriptBlock]::Create([Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($command))))
+  if ($global:LASTEXITCODE -and $global:LASTEXITCODE -ne 0) { exit $global:LASTEXITCODE }
+  exit 0
+}
+$powershellPath = Join-Path $PSHOME 'powershell.exe'
+$outputPath = Join-Path $env:TEMP ('booster-winutil-' + [guid]::NewGuid().ToString('N') + '.out')
+$errorPath = Join-Path $env:TEMP ('booster-winutil-' + [guid]::NewGuid().ToString('N') + '.err')
+try {
+  $process = Start-Process -FilePath $powershellPath -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-EncodedCommand',$command) -Verb RunAs -WindowStyle Hidden -Wait -PassThru -RedirectStandardOutput $outputPath -RedirectStandardError $errorPath -ErrorAction Stop
+  if (Test-Path -LiteralPath $outputPath) { Get-Content -LiteralPath $outputPath -Raw }
+  if ($process.ExitCode -ne 0) {
+    $details = if (Test-Path -LiteralPath $errorPath) { Get-Content -LiteralPath $errorPath -Raw } else { 'No error details were returned.' }
+    throw "WinUtil exited with code $($process.ExitCode): $details"
+  }
+} finally {
+  Remove-Item -LiteralPath $outputPath,$errorPath -Force -ErrorAction SilentlyContinue
+}
+`;
+    log('Starting the curated Chris Titus Tech gaming profile in a hidden PowerShell process. Windows may request administrator approval.', 'ACTION');
+    const output = await runProcess('powershell.exe', [
+      '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-Command', powershell
+    ], { timeout: 300000, maxBuffer: 2 * 1024 * 1024 });
+    const outputTail = output.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).slice(-8);
+    if (outputTail.length) log(`WinUtil report: ${outputTail.join(' · ')}`, 'INFO');
+    log(`WinUtil gaming profile completed. Profile file: ${profilePath}`, 'OK');
+    return {
+      ok: true,
+      profilePath,
+      message: 'WinUtil completed the selected Booster profile: create a restore point, enable Windows Game Mode, and set Windows visual effects for performance. Reboot if Windows or WinUtil reports one is needed; this does not promise a fixed FPS increase.'
+    };
+  } finally {
+    optimizerInProgress = false;
+  }
+}
+
+function handle(channel, handler) {
+  ipcMain.handle(channel, async (event, ...args) => {
+    assertTrustedSender(event);
+    try { return await handler(...args); }
+    catch (error) { log(error.message, 'ERROR'); throw error; }
+  });
+}
+
+function registerIpcHandlers() {
+  handle('booster:launch-fortnite', launchFortnite);
+  handle('booster:run-optimizer', runOptimizer);
+  handle('booster:run-winutil-gaming-profile', runWinUtilGamingProfile);
+  handle('booster:optimize-cpu', optimizeCpuPowerPlan);
+  handle('booster:scan-background-memory', auditBackgroundMemory);
+  handle('booster:apply-windows-tweaks', applyWindowsTweaks);
+  handle('booster:update-fortnite-settings', updateFortniteSettings);
+  handle('booster:run-network-optimization', runNetworkOptimization);
+  handle('booster:get-storage-overview', getStorageOverview);
+  handle('booster:scan-drive-cleanup', scanDriveCleanup);
+  handle('booster:delete-cleanup-candidates', moveCleanupCandidatesToRecycleBin);
+  handle('booster:scan-controller', scanController);
+  handle('booster:get-service-status', getServiceStatus);
+  handle('booster:measure-network-quality', measureNetworkQuality);
+  handle('booster:measure-region', measureRegion);
+  handle('booster:open-sound-settings', openSoundSettings);
+  handle('booster:open-mouse-settings', openMouseSettings);
+  handle('booster:open-epic-launcher', openEpicLauncher);
+}
+
+function createWindow() {
+  mainWindow = new BrowserWindow({
+    width: 1200,
+    height: 800,
+    minWidth: 980,
+    minHeight: 620,
+    resizable: true,
+    maximizable: true,
+    fullscreenable: true,
+    center: true,
+    title: 'Booster',
+    backgroundColor: '#000000',
+    autoHideMenuBar: true,
+    show: false,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true
+    }
+  });
+  mainWindow.once('ready-to-show', () => mainWindow.show());
+  mainWindow.on('closed', () => { mainWindow = undefined; });
+  mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    const isAllowed = app.isPackaged ? url.startsWith('file:') : url.startsWith('http://127.0.0.1:5173/');
+    if (!isAllowed) event.preventDefault();
+  });
+  if (app.isPackaged) mainWindow.loadFile(path.join(app.getAppPath(), 'dist', 'index.html'));
+  else mainWindow.loadURL('http://127.0.0.1:5173');
+}
+
+app.whenReady().then(() => {
+  app.setAppUserModelId('com.booster.desktop');
+  registerIpcHandlers();
+  createWindow();
+  publishHardwareMetrics();
+  metricTimer = setInterval(publishHardwareMetrics, 2500);
+  app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
+}).catch((error) => {
+  console.error('Booster failed to start:', error);
+  app.quit();
+});
+
+app.on('before-quit', () => { if (metricTimer) clearInterval(metricTimer); });
+app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
+)) { skippedFiles += 1; continue; }
       if (entry.isDirectory()) {
         if (root.filesOnly) continue;
         if (CLEANUP_PROTECTED_DIRECTORIES.has(entry.name.trim().toUpperCase())) continue;
